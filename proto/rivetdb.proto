@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package rivetdb;
+
+message BeginTransactionRequest {
+    string client_id = 1;
+}
+
+message BeginTransactionResponse {
+    string txn_id = 1;
+    uint64 snapshot_ts = 2;
+}
+
+message GetRequest {
+    string txn_id = 1;
+    string key = 2;
+}
+
+message GetResponse {
+    bool found = 1;
+    bytes value = 2;
+    uint64 commit_ts = 3;
+}
+
+message PutRequest {
+    string txn_id = 1;
+    string key = 2;
+    bytes value = 3;
+}
+
+message PutResponse {}
+
+message CommitRequest {
+    string txn_id = 1;
+}
+
+message CommitResponse {
+    uint64 commit_ts = 1;
+}
+
+message AbortRequest {
+    string txn_id = 1;
+}
+
+message AbortResponse {}
+
+service RivetKv {
+    rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
+    rpc Get(GetRequest) returns (GetResponse);
+    rpc Put(PutRequest) returns (PutResponse);
+    rpc Commit(CommitRequest) returns (CommitResponse);
+    rpc Abort(AbortRequest) returns (AbortResponse);
+}
