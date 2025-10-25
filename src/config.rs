@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 /// Cluster-wide configuration loaded at startup.
 ///
-/// Week 1 deliverable: establish the configuration contract that later
-/// components (RPC server, storage engine, Raft layer) can rely on. Values will
-/// eventually be hydrated from TOML/JSON files or environment variables.
+/// Establishes the configuration contract that later components (RPC server,
+/// storage engine, Raft layer) can rely on. Values will eventually be hydrated
+/// from TOML/JSON files or environment variables.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RivetConfig {
     /// Stable identifier for the node within the Raft cluster.

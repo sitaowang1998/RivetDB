@@ -1,8 +1,8 @@
 //! Core crate exports for RivetDB.
 //!
-//! Week 1 focuses on design and scaffolding. The modules exposed here define the
-//! boundaries between storage, transaction management, Raft coordination, and
-//! RPC services. Implementations will be filled in during subsequent weeks.
+//! The modules exposed here define the boundaries between storage, transaction
+//! management, Raft coordination, and RPC services. Implementations will be
+//! filled in as the project evolves.
 
 pub mod config;
 pub mod node;

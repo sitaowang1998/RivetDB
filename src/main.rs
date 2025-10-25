@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use rivetdb::{RivetConfig, RivetNode};
 use rivetdb::storage::StorageEngine;
+use rivetdb::{RivetConfig, RivetNode};
 
 #[tokio::main]
 async fn main() {
@@ -13,8 +13,8 @@ async fn main() {
     let config = RivetConfig::default();
     info!("starting RivetDB node with config {:?}", config);
 
-    // Week 1 scaffold: storage implementation is pending. For now we only
-    // verify that the node wiring compiles.
+    // Placeholder storage implementation keeps the node wiring compiling while
+    // a real engine is under development.
     let storage = Arc::new(NoopStorage {});
     let node = RivetNode::new(config, storage);
 
@@ -22,11 +22,8 @@ async fn main() {
 }
 
 fn setup_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
 struct NoopStorage;
