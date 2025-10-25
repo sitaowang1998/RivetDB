@@ -53,14 +53,13 @@ impl StorageEngine for InMemoryStorage {
         let snapshot_ts = txn.snapshot_ts();
 
         for key in txn.read_keys() {
-            if let Some(chain) = store.get(key) {
-                if chain
+            if let Some(chain) = store.get(key)
+                && chain
                     .latest_commit_ts()
                     .map(|ts| ts > snapshot_ts)
                     .unwrap_or(false)
-                {
-                    return Err(StorageError::ValidationConflict);
-                }
+            {
+                return Err(StorageError::ValidationConflict);
             }
         }
 
