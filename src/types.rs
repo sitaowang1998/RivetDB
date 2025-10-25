@@ -12,6 +12,12 @@ pub type Timestamp = u64;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TxnId(Uuid);
 
+impl Default for TxnId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TxnId {
     /// Creates a new transaction identifier using a random UUID.
     pub fn new() -> Self {
