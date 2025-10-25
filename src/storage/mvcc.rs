@@ -39,6 +39,10 @@ impl VersionChain {
             self.versions.get(idx - 1)
         }
     }
+
+    pub fn latest_commit_ts(&self) -> Option<Timestamp> {
+        self.versions.last().map(|version| version.commit_ts)
+    }
 }
 
 #[cfg(test)]
