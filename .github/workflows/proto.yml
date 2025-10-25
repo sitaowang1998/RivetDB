@@ -1,0 +1,30 @@
+name: Proto Verification
+
+on:
+  push:
+    branches:
+      - "**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  proto-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate proto bindings
+        run: cargo check
+
+      - name: Ensure generated files are committed
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "Generated files are stale. Run the build locally and commit the updated artifacts."
+            git status --short
+            exit 1
+          fi
