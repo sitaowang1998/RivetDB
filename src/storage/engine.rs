@@ -30,7 +30,8 @@ pub trait StorageEngine: Send + Sync {
 
     async fn stage_write(
         &self,
-        txn: &TransactionMetadata,
+        txn_id: &TxnId,
+        snapshot_ts: Timestamp,
         intent: WriteIntent,
     ) -> Result<(), StorageError>;
 

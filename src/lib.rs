@@ -15,5 +15,8 @@ pub use config::RivetConfig;
 pub use node::{NodeRole, RivetNode};
 pub use rpc::service::rivet_kv_client::RivetKvClient;
 pub use rpc::service::rivet_kv_server::{RivetKv, RivetKvServer};
-pub use transaction::{TransactionMetadata, TransactionState, WriteIntent};
+pub use transaction::{
+    CommitReceipt, TransactionContext, TransactionManager, TransactionMetadata, TransactionState,
+    WriteIntent,
+};
 pub use types::{Key, Timestamp, TxnId, Value};

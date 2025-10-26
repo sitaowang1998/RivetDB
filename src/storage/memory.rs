@@ -36,11 +36,12 @@ impl StorageEngine for InMemoryStorage {
 
     async fn stage_write(
         &self,
-        txn: &TransactionMetadata,
+        txn_id: &TxnId,
+        _snapshot_ts: Timestamp,
         intent: WriteIntent,
     ) -> Result<(), StorageError> {
         let mut staged = self.staged_writes.write().await;
-        let txn_entry = staged.entry(txn.id().clone()).or_insert_with(HashMap::new);
+        let txn_entry = staged.entry(txn_id.clone()).or_insert_with(HashMap::new);
 
         let WriteIntent { key, value } = intent;
         txn_entry.insert(key, value);
@@ -114,7 +115,8 @@ mod tests {
         let txn = make_txn(commit_ts);
         storage
             .stage_write(
-                &txn,
+                txn.id(),
+                txn.snapshot_ts(),
                 WriteIntent {
                     key: key.to_string(),
                     value: value.to_vec(),
@@ -133,7 +135,8 @@ mod tests {
 
         storage
             .stage_write(
-                &txn,
+                txn.id(),
+                txn.snapshot_ts(),
                 WriteIntent {
                     key: key.clone(),
                     value: b"value1".to_vec(),

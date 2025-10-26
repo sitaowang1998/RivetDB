@@ -14,7 +14,8 @@ async fn commit_flow<E: StorageEngine + 'static>(storage: Arc<E>) {
     let txn1 = new_txn(5);
     storage
         .stage_write(
-            &txn1,
+            txn1.id(),
+            txn1.snapshot_ts(),
             WriteIntent {
                 key: key.clone(),
                 value: b"v1".to_vec(),
@@ -32,7 +33,8 @@ async fn commit_flow<E: StorageEngine + 'static>(storage: Arc<E>) {
     storage.validate(&txn2).await.unwrap();
     storage
         .stage_write(
-            &txn2,
+            txn2.id(),
+            txn2.snapshot_ts(),
             WriteIntent {
                 key: key.clone(),
                 value: b"v2".to_vec(),
@@ -52,7 +54,8 @@ async fn abort_discards_staged_write<E: StorageEngine + 'static>(storage: Arc<E>
 
     storage
         .stage_write(
-            &txn,
+            txn.id(),
+            txn.snapshot_ts(),
             WriteIntent {
                 key: key.clone(),
                 value: b"pending".to_vec(),
