@@ -860,6 +860,7 @@ dependencies = [
  "maplit",
  "openraft-macros",
  "rand",
+ "serde",
  "thiserror",
  "tokio",
  "tracing",
@@ -1196,6 +1197,7 @@ name = "rivetdb"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "once_cell",
  "openraft",
  "prost",
  "protoc-bin-vendored",

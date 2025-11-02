@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rivetdb::rpc::server::RivetKvService;
 use rivetdb::rpc::service::rivet_kv_server::RivetKvServer;
 use rivetdb::storage::InMemoryStorage;
-use rivetdb::{ClientConfig, RivetClient, RivetConfig, RivetNode};
+use rivetdb::{ClientConfig, RivetClient, RivetConfig, RivetNode, reset_registry};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -32,7 +32,11 @@ impl TestServer {
 
         let storage = Arc::new(InMemoryStorage::new());
         let config = RivetConfig::new(0, addr.to_string(), Vec::new(), None);
-        let node = Arc::new(RivetNode::new(config, storage));
+        let node = Arc::new(
+            RivetNode::new(config, storage)
+                .await
+                .expect("raft bootstrap for test server"),
+        );
         let service = RivetKvService::new(node);
 
         let handle = tokio::spawn(async move {
@@ -72,6 +76,7 @@ impl TestServer {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_commit_round_trip() {
+    reset_registry().await;
     let mut server = TestServer::spawn().await;
     let client = RivetClient::connect(ClientConfig::new(server.endpoint()))
         .await
@@ -108,6 +113,7 @@ async fn client_commit_round_trip() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_abort_discards_writes() {
+    reset_registry().await;
     let mut server = TestServer::spawn().await;
     let client = RivetClient::connect(ClientConfig::new(server.endpoint()))
         .await

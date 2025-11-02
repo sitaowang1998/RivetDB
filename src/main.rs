@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("starting RivetDB node with config {:?}", config);
 
     let storage = Arc::new(InMemoryStorage::new());
-    let node = Arc::new(RivetNode::new(config, storage));
+    let node = Arc::new(RivetNode::new(config, storage).await?);
 
     info!("node initialized with role {:?}", node.role());
 

@@ -5,7 +5,9 @@ use rivetdb::{RivetConfig, RivetNode};
 
 async fn setup_node() -> (RivetNode<InMemoryStorage>, Arc<InMemoryStorage>) {
     let storage = Arc::new(InMemoryStorage::new());
-    let node = RivetNode::new(RivetConfig::default(), storage.clone());
+    let node = RivetNode::new(RivetConfig::default(), storage.clone())
+        .await
+        .expect("raft bootstrap");
     (node, storage)
 }
 
