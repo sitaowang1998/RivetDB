@@ -31,8 +31,7 @@ impl TestServer {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         let storage = Arc::new(InMemoryStorage::new());
-        let mut config = RivetConfig::default();
-        config.listen_addr = addr.to_string();
+        let config = RivetConfig::new(0, addr.to_string(), Vec::new(), None);
         let node = Arc::new(RivetNode::new(config, storage));
         let service = RivetKvService::new(node);
 

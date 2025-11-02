@@ -19,6 +19,23 @@ pub struct RivetConfig {
     pub data_dir: Option<PathBuf>,
 }
 
+impl RivetConfig {
+    /// Construct a configuration with explicit values for all fields.
+    pub fn new(
+        node_id: u64,
+        listen_addr: impl Into<String>,
+        raft_peers: Vec<String>,
+        data_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            node_id,
+            listen_addr: listen_addr.into(),
+            raft_peers,
+            data_dir,
+        }
+    }
+}
+
 impl Default for RivetConfig {
     fn default() -> Self {
         Self {
