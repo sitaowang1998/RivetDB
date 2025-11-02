@@ -17,6 +17,13 @@ message GetRequest {
 }
 
 message GetResponse {
+    oneof outcome {
+        GetSuccess success = 1;
+        string error_message = 2;
+    }
+}
+
+message GetSuccess {
     bool found = 1;
     bytes value = 2;
     uint64 commit_ts = 3;
@@ -28,13 +35,27 @@ message PutRequest {
     bytes value = 3;
 }
 
-message PutResponse {}
+message PutResponse {
+    oneof outcome {
+        PutSuccess success = 1;
+        string error_message = 2;
+    }
+}
+
+message PutSuccess {}
 
 message CommitRequest {
     string txn_id = 1;
 }
 
 message CommitResponse {
+    oneof outcome {
+        CommitSuccess success = 1;
+        string error_message = 2;
+    }
+}
+
+message CommitSuccess {
     uint64 commit_ts = 1;
 }
 
@@ -42,7 +63,14 @@ message AbortRequest {
     string txn_id = 1;
 }
 
-message AbortResponse {}
+message AbortResponse {
+    oneof outcome {
+        AbortSuccess success = 1;
+        string error_message = 2;
+    }
+}
+
+message AbortSuccess {}
 
 service RivetKv {
     rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);

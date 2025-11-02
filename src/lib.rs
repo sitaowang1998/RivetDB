@@ -4,6 +4,7 @@
 //! management, Raft coordination, and RPC services. Implementations will be
 //! filled in as the project evolves.
 
+pub mod client;
 pub mod config;
 pub mod node;
 pub mod rpc;
@@ -11,8 +12,10 @@ pub mod storage;
 pub mod transaction;
 pub mod types;
 
+pub use client::{ClientConfig, ClientError, ClientTransaction, GetResult, RivetClient};
 pub use config::RivetConfig;
 pub use node::{NodeRole, RivetNode};
+pub use rpc::server::RivetKvService;
 pub use rpc::service::rivet_kv_client::RivetKvClient;
 pub use rpc::service::rivet_kv_server::{RivetKv, RivetKvServer};
 pub use transaction::{
