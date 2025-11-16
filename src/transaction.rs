@@ -102,25 +102,20 @@ pub struct CommitReceipt {
     pub commit_ts: Timestamp,
 }
 
-/// Transaction record ready to be replicated via Raft.
+/// Transaction record collected for validation and replication.
 #[derive(Debug, Clone)]
-pub struct PreparedCommit {
+pub struct CollectedTransaction {
     pub metadata: TransactionMetadata,
     pub writes: Vec<WriteIntent>,
-    pub commit_ts: Timestamp,
 }
 
-impl PreparedCommit {
-    pub fn commit_ts(&self) -> Timestamp {
-        self.commit_ts
-    }
-
+impl CollectedTransaction {
     pub fn txn_id(&self) -> &TxnId {
         self.metadata.id()
     }
 
-    pub fn into_parts(self) -> (TransactionMetadata, Vec<WriteIntent>, Timestamp) {
-        (self.metadata, self.writes, self.commit_ts)
+    pub fn into_parts(self) -> (TransactionMetadata, Vec<WriteIntent>) {
+        (self.metadata, self.writes)
     }
 }
 
@@ -166,23 +161,22 @@ impl<S: StorageEngine> TransactionManager<S> {
             .await
     }
 
-    pub async fn prepare_commit(
+    pub async fn collect(
         &self,
         txn: TransactionContext,
-    ) -> Result<PreparedCommit, StorageError> {
+    ) -> Result<CollectedTransaction, StorageError> {
         self.storage.validate(txn.metadata()).await?;
-        let commit_ts = self.next_ts();
         let writes = self.storage.drain_writes(txn.id()).await;
-        Ok(PreparedCommit {
+        Ok(CollectedTransaction {
             metadata: txn.into_metadata(),
             writes,
-            commit_ts,
         })
     }
 
     pub async fn commit(&self, txn: TransactionContext) -> Result<CommitReceipt, StorageError> {
-        let prepared = self.prepare_commit(txn).await?;
-        let (_, writes, commit_ts) = prepared.into_parts();
+        let collected = self.collect(txn).await?;
+        let commit_ts = self.next_ts();
+        let (_, writes) = collected.into_parts();
         self.storage.apply_committed(commit_ts, writes).await?;
         Ok(CommitReceipt { commit_ts })
     }
@@ -191,7 +185,14 @@ impl<S: StorageEngine> TransactionManager<S> {
         self.storage.abort(txn.metadata().id()).await;
     }
 
-    fn next_ts(&self) -> Timestamp {
+    pub async fn validate_metadata(
+        &self,
+        metadata: &TransactionMetadata,
+    ) -> Result<(), StorageError> {
+        self.storage.validate(metadata).await
+    }
+
+    pub fn next_ts(&self) -> Timestamp {
         self.clock.fetch_add(1, Ordering::SeqCst) + 1
     }
 }

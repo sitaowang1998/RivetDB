@@ -2,18 +2,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use tokio::time::{Duration, sleep};
 use tonic::{Response, Status};
 
 use crate::node::{CommitError, NodeRole, RivetNode};
+use crate::rpc::service::rivet_kv_client::RivetKvClient;
 use crate::storage::{StorageEngine, StorageError};
-use crate::transaction::{CommitReceipt, TransactionContext, TransactionManager};
+use crate::transaction::{
+    CollectedTransaction, CommitReceipt, Snapshot, TransactionContext, TransactionManager,
+    TransactionMetadata, WriteIntent,
+};
 use crate::types::TxnId;
 
 use super::service::rivet_kv_server::RivetKv;
 use super::service::{
     AbortRequest, AbortResponse, AbortSuccess, BeginTransactionRequest, BeginTransactionResponse,
     CommitRequest, CommitResponse, CommitSuccess, GetRequest, GetResponse, GetSuccess, PutRequest,
-    PutResponse, PutSuccess, abort_response, commit_response, get_response, put_response,
+    PutResponse, PutSuccess, ShipTransactionRequest, WriteMutation, abort_response,
+    commit_response, get_response, put_response,
 };
 
 /// gRPC service that bridges the transaction manager with network clients.
@@ -52,6 +58,98 @@ impl<S: StorageEngine + 'static> RivetKvService<S> {
 
     fn invalid_txn_status() -> Status {
         Status::invalid_argument(Self::INVALID_TXN_ID_MESSAGE)
+    }
+
+    async fn forward_commit(
+        &self,
+        collected: CollectedTransaction,
+    ) -> Result<CommitReceipt, String> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+
+            let leader_url = match self.node.leader_endpoint_url() {
+                Some(url) => url,
+                None => {
+                    if attempts >= 5 {
+                        return Err("leader unknown".to_string());
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+
+            let mut client = match RivetKvClient::connect(leader_url.clone())
+                .await
+                .map_err(|err| err.to_string())
+            {
+                Ok(client) => client,
+                Err(message) => {
+                    if attempts >= 5 || !Self::should_retry_forward(&message) {
+                        return Err(message);
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+
+            let request = Self::build_ship_request(&collected);
+            let response = match client.ship_transaction(request).await {
+                Ok(resp) => resp.into_inner(),
+                Err(status) => {
+                    let message = status.to_string();
+                    if attempts >= 5 || !Self::should_retry_forward(&message) {
+                        return Err(message);
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+
+            match response.outcome {
+                Some(commit_response::Outcome::Success(CommitSuccess { commit_ts })) => {
+                    return Ok(CommitReceipt { commit_ts });
+                }
+                Some(commit_response::Outcome::ErrorMessage(message)) => {
+                    if attempts >= 5 || !Self::should_retry_forward(&message) {
+                        return Err(message);
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+                None => {
+                    if attempts >= 5 {
+                        return Err("malformed leader response".to_string());
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    fn build_ship_request(collected: &CollectedTransaction) -> ShipTransactionRequest {
+        ShipTransactionRequest {
+            txn_id: collected.metadata.id().to_string(),
+            snapshot_ts: collected.metadata.snapshot_ts(),
+            read_keys: collected.metadata.read_keys().to_vec(),
+            writes: collected
+                .writes
+                .iter()
+                .map(|w| WriteMutation {
+                    key: w.key.clone(),
+                    value: w.value.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn should_retry_forward(message: &str) -> bool {
+        if message.contains("validation conflict") {
+            return false;
+        }
+        if message.contains("transaction not found") {
+            return false;
+        }
+        true
     }
 }
 
@@ -175,28 +273,34 @@ where
             }
         };
 
-        if self.node.role() != NodeRole::Leader {
-            self.store_txn(txn).await;
-            return Ok(Response::new(CommitResponse {
-                outcome: Some(commit_response::Outcome::ErrorMessage(
-                    "not leader".to_string(),
-                )),
-            }));
-        }
-
-        match self.manager().prepare_commit(txn).await {
-            Ok(prepared) => match self.node.replicate_commit(prepared).await {
-                Ok(CommitReceipt { commit_ts }) => Ok(Response::new(CommitResponse {
-                    outcome: Some(commit_response::Outcome::Success(CommitSuccess {
-                        commit_ts,
-                    })),
-                })),
-                Err(err) => Ok(Response::new(CommitResponse {
-                    outcome: Some(commit_response::Outcome::ErrorMessage(
-                        commit_error_message(err),
-                    )),
-                })),
-            },
+        match self.manager().collect(txn).await {
+            Ok(collected) => {
+                if self.node.role() == NodeRole::Leader {
+                    match self.node.replicate_commit(collected).await {
+                        Ok(CommitReceipt { commit_ts }) => Ok(Response::new(CommitResponse {
+                            outcome: Some(commit_response::Outcome::Success(CommitSuccess {
+                                commit_ts,
+                            })),
+                        })),
+                        Err(err) => Ok(Response::new(CommitResponse {
+                            outcome: Some(commit_response::Outcome::ErrorMessage(
+                                commit_error_message(err),
+                            )),
+                        })),
+                    }
+                } else {
+                    match self.forward_commit(collected).await {
+                        Ok(CommitReceipt { commit_ts }) => Ok(Response::new(CommitResponse {
+                            outcome: Some(commit_response::Outcome::Success(CommitSuccess {
+                                commit_ts,
+                            })),
+                        })),
+                        Err(message) => Ok(Response::new(CommitResponse {
+                            outcome: Some(commit_response::Outcome::ErrorMessage(message)),
+                        })),
+                    }
+                }
+            }
             Err(err) => Ok(Response::new(CommitResponse {
                 outcome: Some(commit_response::Outcome::ErrorMessage(
                     storage_error_message(err),
@@ -222,6 +326,43 @@ where
             None => Ok(Response::new(AbortResponse {
                 outcome: Some(abort_response::Outcome::ErrorMessage(
                     "transaction not found".to_string(),
+                )),
+            })),
+        }
+    }
+
+    async fn ship_transaction(
+        &self,
+        request: tonic::Request<ShipTransactionRequest>,
+    ) -> Result<Response<CommitResponse>, Status> {
+        let req = request.into_inner();
+        let txn_id = Self::parse_txn_id(&req.txn_id).map_err(|_| Self::invalid_txn_status())?;
+
+        let mut metadata = TransactionMetadata::new(txn_id, Snapshot::new(req.snapshot_ts));
+        for key in req.read_keys {
+            metadata.record_read(key);
+        }
+
+        let writes = req
+            .writes
+            .into_iter()
+            .map(|w| WriteIntent {
+                key: w.key,
+                value: w.value,
+            })
+            .collect::<Vec<_>>();
+
+        let collected = CollectedTransaction { metadata, writes };
+
+        match self.node.replicate_commit(collected).await {
+            Ok(CommitReceipt { commit_ts }) => Ok(Response::new(CommitResponse {
+                outcome: Some(commit_response::Outcome::Success(CommitSuccess {
+                    commit_ts,
+                })),
+            })),
+            Err(err) => Ok(Response::new(CommitResponse {
+                outcome: Some(commit_response::Outcome::ErrorMessage(
+                    commit_error_message(err),
                 )),
             })),
         }

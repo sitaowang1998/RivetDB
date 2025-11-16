@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use openraft::BasicNode;
@@ -12,7 +12,7 @@ use crate::raft::{
     default_raft_config, encode_command, registry as global_registry,
 };
 use crate::storage::StorageEngine;
-use crate::transaction::{CommitReceipt, PreparedCommit, TransactionManager};
+use crate::transaction::{CollectedTransaction, CommitReceipt, TransactionManager};
 
 /// Logical role within the Raft group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,8 @@ pub enum NodeError {
 pub enum CommitError {
     #[error("failed to encode Raft command: {0}")]
     Encode(#[from] serde_json::Error),
+    #[error("validation failed: {0}")]
+    Validation(#[from] crate::storage::StorageError),
     #[error("Raft client write failed: {0}")]
     Raft(#[from] Box<openraft::error::RaftError<u64, ClientWriteError<u64, BasicNode>>>),
 }
@@ -48,6 +50,7 @@ pub struct RivetNode<S: StorageEngine> {
     txn_manager: TransactionManager<S>,
     raft: RivetRaft,
     registry: Arc<RaftRegistry>,
+    endpoints: HashMap<u64, String>,
 }
 
 impl<S: StorageEngine + 'static> RivetNode<S> {
@@ -78,11 +81,18 @@ impl<S: StorageEngine + 'static> RivetNode<S> {
 
         let txn_manager = TransactionManager::new(storage.clone());
 
+        let mut endpoints = HashMap::new();
+        endpoints.insert(config.node_id, config.listen_addr.clone());
+        for peer in &config.raft_peers {
+            endpoints.insert(peer.node_id, peer.listen_addr.clone());
+        }
+
         Ok(Self {
             config,
             txn_manager,
             raft,
             registry,
+            endpoints,
         })
     }
 
@@ -108,11 +118,15 @@ impl<S: StorageEngine + 'static> RivetNode<S> {
 
     pub async fn replicate_commit(
         &self,
-        prepared: PreparedCommit,
+        collected: CollectedTransaction,
     ) -> Result<CommitReceipt, CommitError> {
-        let (metadata, writes, commit_ts) = prepared.into_parts();
+        self.txn_manager
+            .validate_metadata(&collected.metadata)
+            .await?;
+        let commit_ts = self.txn_manager.next_ts();
+        let writes = collected.writes;
         let command = RaftCommand::ApplyTransaction(ReplicatedTransaction {
-            txn_id: metadata.id().clone(),
+            txn_id: collected.metadata.id().clone(),
             commit_ts,
             writes,
         });
@@ -122,6 +136,28 @@ impl<S: StorageEngine + 'static> RivetNode<S> {
             .await
             .map_err(|err| CommitError::Raft(Box::new(err)))?;
         Ok(CommitReceipt { commit_ts })
+    }
+
+    pub fn leader_id(&self) -> Option<u64> {
+        self.raft.metrics().borrow().current_leader
+    }
+
+    pub fn endpoint_for(&self, node_id: u64) -> Option<String> {
+        self.endpoints.get(&node_id).cloned()
+    }
+
+    pub fn leader_endpoint(&self) -> Option<String> {
+        self.leader_id().and_then(|id| self.endpoint_for(id))
+    }
+
+    pub fn leader_endpoint_url(&self) -> Option<String> {
+        self.leader_endpoint().map(|addr| {
+            if addr.starts_with("http://") || addr.starts_with("https://") {
+                addr
+            } else {
+                format!("http://{}", addr)
+            }
+        })
     }
 }
 

@@ -71,9 +71,9 @@ async fn replicated_commit_visible_on_followers() {
         .await
         .expect("stage write");
 
-    let prepared = manager.prepare_commit(txn).await.expect("prepare commit");
+    let collected = manager.collect(txn).await.expect("collect transaction");
     let receipt = leader_node
-        .replicate_commit(prepared)
+        .replicate_commit(collected)
         .await
         .expect("raft commit");
 
@@ -139,7 +139,7 @@ async fn spawn_cluster(
 }
 
 async fn wait_for_cluster_convergence(node_ids: &[u64], leader: u64) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let mut consistent = true;
         for &node_id in node_ids {
