@@ -28,10 +28,7 @@ pub enum NodeError {
     Raft(#[from] openraft::error::Fatal<u64>),
     #[error("failed to initialize Raft membership: {0}")]
     Initialize(
-        #[from] openraft::error::RaftError<
-            u64,
-            openraft::error::InitializeError<u64, BasicNode>,
-        >,
+        #[from] openraft::error::RaftError<u64, openraft::error::InitializeError<u64, BasicNode>>,
     ),
 }
 
@@ -111,10 +108,7 @@ impl<S: StorageEngine> RivetNode<S> {
 
 fn membership_nodes(config: &RivetConfig) -> BTreeMap<u64, BasicNode> {
     let mut members = BTreeMap::new();
-    members.insert(
-        config.node_id,
-        BasicNode::new(config.listen_addr.clone()),
-    );
+    members.insert(config.node_id, BasicNode::new(config.listen_addr.clone()));
     for peer in &config.raft_peers {
         if peer.node_id == config.node_id {
             continue;
@@ -124,7 +118,10 @@ fn membership_nodes(config: &RivetConfig) -> BTreeMap<u64, BasicNode> {
     members
 }
 
-async fn ensure_initial_membership(raft: &RivetRaft, config: &RivetConfig) -> Result<(), NodeError> {
+async fn ensure_initial_membership(
+    raft: &RivetRaft,
+    config: &RivetConfig,
+) -> Result<(), NodeError> {
     use openraft::error::InitializeError;
 
     let members = membership_nodes(config);

@@ -4,7 +4,7 @@ use std::time::Duration;
 use openraft::ServerState;
 use rivetdb::storage::InMemoryStorage;
 use rivetdb::{PeerConfig, RivetConfig, RivetNode, collect_metrics, reset_registry};
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn multi_node_cluster_elects_single_leader() {
