@@ -4,6 +4,7 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use openraft::error::{
@@ -16,8 +17,12 @@ use openraft::storage::{
 };
 use openraft::{
     self, BasicNode, Config, Entry, EntryPayload, LogId, LogState, OptionalSend, Snapshot,
-    SnapshotMeta, StorageError, StoredMembership, Vote,
+    SnapshotMeta, StorageError as RaftStorageError, StorageIOError, StoredMembership, Vote,
 };
+
+use crate::storage::StorageEngine;
+use crate::transaction::WriteIntent;
+use crate::types::{Timestamp, TxnId};
 
 openraft::declare_raft_types!(
     /// Openraft type configuration used by RivetDB during early integration.
@@ -31,6 +36,35 @@ openraft::declare_raft_types!(
 
 /// Convenience alias for the Openraft handle parameterised with [`RivetRaftConfig`].
 pub type RivetRaft = openraft::Raft<RivetRaftConfig>;
+
+/// Commands replicated through Raft to update the storage engine.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum RaftCommand {
+    ApplyTransaction(ReplicatedTransaction),
+}
+
+/// Transaction payload recorded in the Raft log.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReplicatedTransaction {
+    pub txn_id: TxnId,
+    pub commit_ts: Timestamp,
+    pub writes: Vec<WriteIntent>,
+}
+
+pub fn encode_command(command: &RaftCommand) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(command)
+}
+
+fn decode_command(bytes: &[u8]) -> Result<RaftCommand, serde_json::Error> {
+    serde_json::from_slice(bytes)
+}
+
+fn map_apply_error(log_id: LogId<u64>, message: impl Into<String>) -> RaftStorageError<u64> {
+    let io_error = std::io::Error::other(message.into());
+    RaftStorageError::IO {
+        source: StorageIOError::apply(log_id, &io_error),
+    }
+}
 
 /// Shared singleton routing table for in-memory Raft RPC forwarding during tests.
 static GLOBAL_REGISTRY: Lazy<Arc<RaftRegistry>> = Lazy::new(|| Arc::new(RaftRegistry::default()));
@@ -49,11 +83,11 @@ pub async fn reset_registry() {
 pub struct RivetStore;
 
 impl RivetStore {
-    pub fn handles() -> (RivetLogStore, RivetStateMachine) {
+    pub fn handles<S: StorageEngine>(storage: Arc<S>) -> (RivetLogStore, RivetStateMachine<S>) {
         let core = Arc::new(RwLock::new(RivetStorageCore::default()));
         (
             RivetLogStore { core: core.clone() },
-            RivetStateMachine { core },
+            RivetStateMachine { core, storage },
         )
     }
 }
@@ -93,8 +127,9 @@ pub struct RivetLogReader {
 }
 
 #[derive(Clone)]
-pub struct RivetStateMachine {
+pub struct RivetStateMachine<S: StorageEngine> {
     core: Arc<RwLock<RivetStorageCore>>,
+    storage: Arc<S>,
 }
 
 pub struct RivetSnapshotBuilder {
@@ -105,7 +140,7 @@ impl RaftLogReader<RivetRaftConfig> for RivetLogStore {
     async fn try_get_log_entries<RB>(
         &mut self,
         range: RB,
-    ) -> Result<Vec<Entry<RivetRaftConfig>>, StorageError<u64>>
+    ) -> Result<Vec<Entry<RivetRaftConfig>>, RaftStorageError<u64>>
     where
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + OptionalSend,
     {
@@ -124,7 +159,7 @@ impl RaftLogReader<RivetRaftConfig> for RivetLogReader {
     async fn try_get_log_entries<RB>(
         &mut self,
         range: RB,
-    ) -> Result<Vec<Entry<RivetRaftConfig>>, StorageError<u64>>
+    ) -> Result<Vec<Entry<RivetRaftConfig>>, RaftStorageError<u64>>
     where
         RB: RangeBounds<u64> + Clone + std::fmt::Debug + OptionalSend,
     {
@@ -142,7 +177,7 @@ impl RaftLogReader<RivetRaftConfig> for RivetLogReader {
 impl RaftLogStorage<RivetRaftConfig> for RivetLogStore {
     type LogReader = RivetLogReader;
 
-    async fn get_log_state(&mut self) -> Result<LogState<RivetRaftConfig>, StorageError<u64>> {
+    async fn get_log_state(&mut self) -> Result<LogState<RivetRaftConfig>, RaftStorageError<u64>> {
         let core = self.core.read().await;
         let last_purged = core.last_purged;
         let last_log = core.log.last().map(|entry| entry.log_id).or(last_purged);
@@ -159,12 +194,12 @@ impl RaftLogStorage<RivetRaftConfig> for RivetLogStore {
         }
     }
 
-    async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
+    async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), RaftStorageError<u64>> {
         self.core.write().await.vote = Some(*vote);
         Ok(())
     }
 
-    async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, StorageError<u64>> {
+    async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, RaftStorageError<u64>> {
         let guard = self.core.read().await;
         Ok(guard.vote)
     }
@@ -172,12 +207,12 @@ impl RaftLogStorage<RivetRaftConfig> for RivetLogStore {
     async fn save_committed(
         &mut self,
         committed: Option<LogId<u64>>,
-    ) -> Result<(), StorageError<u64>> {
+    ) -> Result<(), RaftStorageError<u64>> {
         self.core.write().await.committed = committed;
         Ok(())
     }
 
-    async fn read_committed(&mut self) -> Result<Option<LogId<u64>>, StorageError<u64>> {
+    async fn read_committed(&mut self) -> Result<Option<LogId<u64>>, RaftStorageError<u64>> {
         let guard = self.core.read().await;
         Ok(guard.committed)
     }
@@ -186,7 +221,7 @@ impl RaftLogStorage<RivetRaftConfig> for RivetLogStore {
         &mut self,
         entries: I,
         callback: LogFlushed<RivetRaftConfig>,
-    ) -> Result<(), StorageError<u64>>
+    ) -> Result<(), RaftStorageError<u64>>
     where
         I: IntoIterator<Item = Entry<RivetRaftConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
@@ -200,13 +235,13 @@ impl RaftLogStorage<RivetRaftConfig> for RivetLogStore {
         Ok(())
     }
 
-    async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
+    async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), RaftStorageError<u64>> {
         let mut core = self.core.write().await;
         core.log.retain(|entry| entry.log_id.index < log_id.index);
         Ok(())
     }
 
-    async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
+    async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), RaftStorageError<u64>> {
         let mut core = self.core.write().await;
         core.log.retain(|entry| entry.log_id.index > log_id.index);
         core.last_purged = Some(log_id);
@@ -214,35 +249,51 @@ impl RaftLogStorage<RivetRaftConfig> for RivetLogStore {
     }
 }
 
-impl RaftStateMachine<RivetRaftConfig> for RivetStateMachine {
+impl<S> RaftStateMachine<RivetRaftConfig> for RivetStateMachine<S>
+where
+    S: StorageEngine + 'static,
+{
     type SnapshotBuilder = RivetSnapshotBuilder;
 
     async fn applied_state(
         &mut self,
-    ) -> Result<(Option<LogId<u64>>, StoredMembership<u64, BasicNode>), StorageError<u64>> {
+    ) -> Result<(Option<LogId<u64>>, StoredMembership<u64, BasicNode>), RaftStorageError<u64>> {
         let core = self.core.read().await;
         Ok((core.state.last_applied, core.state.last_membership.clone()))
     }
 
-    async fn apply<I>(&mut self, entries: I) -> Result<Vec<()>, StorageError<u64>>
+    async fn apply<I>(&mut self, entries: I) -> Result<Vec<()>, RaftStorageError<u64>>
     where
         I: IntoIterator<Item = Entry<RivetRaftConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
-        let mut core = self.core.write().await;
         let mut responses = Vec::new();
 
         for entry in entries {
             let log_id = entry.log_id;
-            core.state.last_applied = Some(log_id);
 
             match entry.payload {
-                EntryPayload::Blank => {}
+                EntryPayload::Blank => {
+                    let mut core = self.core.write().await;
+                    core.state.last_applied = Some(log_id);
+                }
                 EntryPayload::Normal(data) => {
+                    let command = decode_command(&data)
+                        .map_err(|err| map_apply_error(log_id, err.to_string()))?;
+                    let RaftCommand::ApplyTransaction(txn) = command;
+                    self.storage
+                        .apply_committed(txn.commit_ts, txn.writes)
+                        .await
+                        .map_err(|err| map_apply_error(log_id, err.to_string()))?;
+
+                    let mut core = self.core.write().await;
+                    core.state.last_applied = Some(log_id);
                     core.state.applied_commands.push(data);
                 }
                 EntryPayload::Membership(membership) => {
+                    let mut core = self.core.write().await;
                     core.state.last_membership = StoredMembership::new(Some(log_id), membership);
+                    core.state.last_applied = Some(log_id);
                 }
             }
 
@@ -260,8 +311,10 @@ impl RaftStateMachine<RivetRaftConfig> for RivetStateMachine {
 
     async fn begin_receiving_snapshot(
         &mut self,
-    ) -> Result<Box<<RivetRaftConfig as openraft::RaftTypeConfig>::SnapshotData>, StorageError<u64>>
-    {
+    ) -> Result<
+        Box<<RivetRaftConfig as openraft::RaftTypeConfig>::SnapshotData>,
+        RaftStorageError<u64>,
+    > {
         Ok(Box::new(Cursor::new(Vec::new())))
     }
 
@@ -269,7 +322,7 @@ impl RaftStateMachine<RivetRaftConfig> for RivetStateMachine {
         &mut self,
         meta: &SnapshotMeta<u64, BasicNode>,
         snapshot: Box<<RivetRaftConfig as openraft::RaftTypeConfig>::SnapshotData>,
-    ) -> Result<(), StorageError<u64>> {
+    ) -> Result<(), RaftStorageError<u64>> {
         let mut core = self.core.write().await;
         let data = snapshot.into_inner();
         core.snapshot = Some(StoredSnapshot {
@@ -283,7 +336,7 @@ impl RaftStateMachine<RivetRaftConfig> for RivetStateMachine {
 
     async fn get_current_snapshot(
         &mut self,
-    ) -> Result<Option<Snapshot<RivetRaftConfig>>, StorageError<u64>> {
+    ) -> Result<Option<Snapshot<RivetRaftConfig>>, RaftStorageError<u64>> {
         let core = self.core.read().await;
         Ok(core.snapshot.as_ref().map(|stored| Snapshot {
             meta: stored.meta.clone(),
@@ -293,7 +346,7 @@ impl RaftStateMachine<RivetRaftConfig> for RivetStateMachine {
 }
 
 impl RaftSnapshotBuilder<RivetRaftConfig> for RivetSnapshotBuilder {
-    async fn build_snapshot(&mut self) -> Result<Snapshot<RivetRaftConfig>, StorageError<u64>> {
+    async fn build_snapshot(&mut self) -> Result<Snapshot<RivetRaftConfig>, RaftStorageError<u64>> {
         let mut core = self.core.write().await;
         core.snapshot_seq += 1;
         let snapshot_id = format!("rivet-snapshot-{}", core.snapshot_seq);

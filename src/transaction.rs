@@ -90,12 +90,38 @@ impl TransactionContext {
     pub fn snapshot_ts(&self) -> Timestamp {
         self.metadata.snapshot_ts()
     }
+
+    pub fn into_metadata(self) -> TransactionMetadata {
+        self.metadata
+    }
 }
 
 /// Result returned when a transaction successfully commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitReceipt {
     pub commit_ts: Timestamp,
+}
+
+/// Transaction record ready to be replicated via Raft.
+#[derive(Debug, Clone)]
+pub struct PreparedCommit {
+    pub metadata: TransactionMetadata,
+    pub writes: Vec<WriteIntent>,
+    pub commit_ts: Timestamp,
+}
+
+impl PreparedCommit {
+    pub fn commit_ts(&self) -> Timestamp {
+        self.commit_ts
+    }
+
+    pub fn txn_id(&self) -> &TxnId {
+        self.metadata.id()
+    }
+
+    pub fn into_parts(self) -> (TransactionMetadata, Vec<WriteIntent>, Timestamp) {
+        (self.metadata, self.writes, self.commit_ts)
+    }
 }
 
 /// Coordinates optimistic transactions over an MVCC storage engine.
@@ -140,10 +166,24 @@ impl<S: StorageEngine> TransactionManager<S> {
             .await
     }
 
-    pub async fn commit(&self, txn: TransactionContext) -> Result<CommitReceipt, StorageError> {
+    pub async fn prepare_commit(
+        &self,
+        txn: TransactionContext,
+    ) -> Result<PreparedCommit, StorageError> {
         self.storage.validate(txn.metadata()).await?;
         let commit_ts = self.next_ts();
-        self.storage.commit(txn.metadata(), commit_ts).await?;
+        let writes = self.storage.drain_writes(txn.id()).await;
+        Ok(PreparedCommit {
+            metadata: txn.into_metadata(),
+            writes,
+            commit_ts,
+        })
+    }
+
+    pub async fn commit(&self, txn: TransactionContext) -> Result<CommitReceipt, StorageError> {
+        let prepared = self.prepare_commit(txn).await?;
+        let (_, writes, commit_ts) = prepared.into_parts();
+        self.storage.apply_committed(commit_ts, writes).await?;
         Ok(CommitReceipt { commit_ts })
     }
 

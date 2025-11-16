@@ -67,22 +67,30 @@ impl StorageEngine for InMemoryStorage {
         Ok(())
     }
 
-    async fn commit(
-        &self,
-        txn: &TransactionMetadata,
-        commit_ts: Timestamp,
-    ) -> Result<(), StorageError> {
-        let writes = {
-            let mut staged = self.staged_writes.write().await;
-            staged.remove(txn.id()).unwrap_or_default()
-        };
+    async fn drain_writes(&self, txn_id: &TxnId) -> Vec<WriteIntent> {
+        let mut staged = self.staged_writes.write().await;
+        staged
+            .remove(txn_id)
+            .map(|writes| {
+                writes
+                    .into_iter()
+                    .map(|(key, value)| WriteIntent { key, value })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 
+    async fn apply_committed(
+        &self,
+        commit_ts: Timestamp,
+        writes: Vec<WriteIntent>,
+    ) -> Result<(), StorageError> {
         if writes.is_empty() {
             return Ok(());
         }
 
         let mut store = self.version_chains.write().await;
-        for (key, value) in writes {
+        for WriteIntent { key, value } in writes {
             let chain = store.entry(key).or_insert_with(VersionChain::default);
             chain.append(VersionedValue::new(value, commit_ts));
         }
@@ -124,7 +132,8 @@ mod tests {
             )
             .await
             .unwrap();
-        storage.commit(&txn, commit_ts).await.unwrap();
+        let writes = storage.drain_writes(txn.id()).await;
+        storage.apply_committed(commit_ts, writes).await.unwrap();
     }
 
     #[tokio::test]
@@ -145,7 +154,8 @@ mod tests {
             .await
             .unwrap();
 
-        storage.commit(&txn, 10).await.unwrap();
+        let writes = storage.drain_writes(txn.id()).await;
+        storage.apply_committed(10, writes).await.unwrap();
 
         let read = storage.read(&key, 10).await.unwrap();
         let version = read.expect("expected committed value");

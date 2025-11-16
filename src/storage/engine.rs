@@ -37,10 +37,12 @@ pub trait StorageEngine: Send + Sync {
 
     async fn validate(&self, txn: &TransactionMetadata) -> Result<(), StorageError>;
 
-    async fn commit(
+    async fn drain_writes(&self, txn_id: &TxnId) -> Vec<WriteIntent>;
+
+    async fn apply_committed(
         &self,
-        txn: &TransactionMetadata,
         commit_ts: Timestamp,
+        writes: Vec<WriteIntent>,
     ) -> Result<(), StorageError>;
 
     async fn abort(&self, txn_id: &TxnId);

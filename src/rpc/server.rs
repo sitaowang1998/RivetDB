@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Response, Status};
 
-use crate::node::RivetNode;
+use crate::node::{CommitError, NodeRole, RivetNode};
 use crate::storage::{StorageEngine, StorageError};
 use crate::transaction::{CommitReceipt, TransactionContext, TransactionManager};
 use crate::types::TxnId;
@@ -22,7 +22,7 @@ pub struct RivetKvService<S: StorageEngine> {
     in_flight: Mutex<HashMap<TxnId, TransactionContext>>,
 }
 
-impl<S: StorageEngine> RivetKvService<S> {
+impl<S: StorageEngine + 'static> RivetKvService<S> {
     const INVALID_TXN_ID_MESSAGE: &'static str = "invalid transaction id";
 
     pub fn new(node: Arc<RivetNode<S>>) -> Self {
@@ -175,20 +175,33 @@ where
             }
         };
 
-        match self.manager().commit(txn.clone()).await {
-            Ok(CommitReceipt { commit_ts }) => Ok(Response::new(CommitResponse {
-                outcome: Some(commit_response::Outcome::Success(CommitSuccess {
-                    commit_ts,
+        if self.node.role() != NodeRole::Leader {
+            self.store_txn(txn).await;
+            return Ok(Response::new(CommitResponse {
+                outcome: Some(commit_response::Outcome::ErrorMessage(
+                    "not leader".to_string(),
+                )),
+            }));
+        }
+
+        match self.manager().prepare_commit(txn).await {
+            Ok(prepared) => match self.node.replicate_commit(prepared).await {
+                Ok(CommitReceipt { commit_ts }) => Ok(Response::new(CommitResponse {
+                    outcome: Some(commit_response::Outcome::Success(CommitSuccess {
+                        commit_ts,
+                    })),
                 })),
-            })),
-            Err(err) => {
-                self.store_txn(txn).await;
-                Ok(Response::new(CommitResponse {
+                Err(err) => Ok(Response::new(CommitResponse {
                     outcome: Some(commit_response::Outcome::ErrorMessage(
-                        storage_error_message(err),
+                        commit_error_message(err),
                     )),
-                }))
-            }
+                })),
+            },
+            Err(err) => Ok(Response::new(CommitResponse {
+                outcome: Some(commit_response::Outcome::ErrorMessage(
+                    storage_error_message(err),
+                )),
+            })),
         }
     }
 
@@ -222,4 +235,8 @@ fn storage_error_message(err: StorageError) -> String {
         StorageError::CorruptedState(details) => details,
         StorageError::Unimplemented => "operation not implemented".to_string(),
     }
+}
+
+fn commit_error_message(err: CommitError) -> String {
+    err.to_string()
 }

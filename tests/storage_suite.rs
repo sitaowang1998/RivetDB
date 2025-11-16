@@ -23,7 +23,8 @@ async fn commit_flow<E: StorageEngine + 'static>(storage: Arc<E>) {
         )
         .await
         .unwrap();
-    storage.commit(&txn1, 10).await.unwrap();
+    let writes = storage.drain_writes(txn1.id()).await;
+    storage.apply_committed(10, writes).await.unwrap();
 
     let snapshot = storage.read(&key, 10).await.unwrap();
     assert_eq!(snapshot.unwrap().value, b"v1");
@@ -42,7 +43,8 @@ async fn commit_flow<E: StorageEngine + 'static>(storage: Arc<E>) {
         )
         .await
         .unwrap();
-    storage.commit(&txn2, 15).await.unwrap();
+    let writes = storage.drain_writes(txn2.id()).await;
+    storage.apply_committed(15, writes).await.unwrap();
 
     let latest = storage.read(&key, 20).await.unwrap();
     assert_eq!(latest.unwrap().value, b"v2");
@@ -65,7 +67,8 @@ async fn abort_discards_staged_write<E: StorageEngine + 'static>(storage: Arc<E>
         .unwrap();
 
     storage.abort(txn.id()).await;
-    storage.commit(&txn, 12).await.unwrap();
+    let writes = storage.drain_writes(txn.id()).await;
+    storage.apply_committed(12, writes).await.unwrap();
 
     let read = storage.read(&key, 20).await.unwrap();
     assert!(read.is_none());

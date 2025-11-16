@@ -3,15 +3,16 @@ use std::sync::Arc;
 
 use openraft::BasicNode;
 use openraft::ServerState;
+use openraft::error::ClientWriteError;
 use thiserror::Error;
 
 use crate::config::RivetConfig;
 use crate::raft::{
-    RaftRegistry, RivetNetworkFactory, RivetRaft, RivetStore, default_raft_config,
-    registry as global_registry,
+    RaftCommand, RaftRegistry, ReplicatedTransaction, RivetNetworkFactory, RivetRaft, RivetStore,
+    default_raft_config, encode_command, registry as global_registry,
 };
 use crate::storage::StorageEngine;
-use crate::transaction::{TransactionManager, TransactionMetadata};
+use crate::transaction::{CommitReceipt, PreparedCommit, TransactionManager};
 
 /// Logical role within the Raft group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,21 +33,29 @@ pub enum NodeError {
     ),
 }
 
+/// Errors surfaced while replicating a transaction through Raft.
+#[derive(Debug, Error)]
+pub enum CommitError {
+    #[error("failed to encode Raft command: {0}")]
+    Encode(#[from] serde_json::Error),
+    #[error("Raft client write failed: {0}")]
+    Raft(#[from] Box<openraft::error::RaftError<u64, ClientWriteError<u64, BasicNode>>>),
+}
+
 /// High-level node abstraction composing storage + consensus + RPC layers.
 pub struct RivetNode<S: StorageEngine> {
     config: RivetConfig,
-    storage: Arc<S>,
     txn_manager: TransactionManager<S>,
     raft: RivetRaft,
     registry: Arc<RaftRegistry>,
 }
 
-impl<S: StorageEngine> RivetNode<S> {
+impl<S: StorageEngine + 'static> RivetNode<S> {
     pub async fn new(config: RivetConfig, storage: Arc<S>) -> Result<Self, NodeError> {
         let registry = global_registry();
         let raft_cfg = default_raft_config();
 
-        let (log_store, state_machine) = RivetStore::handles();
+        let (log_store, state_machine) = RivetStore::handles(storage.clone());
         let network = RivetNetworkFactory::new(registry.clone());
 
         let raft = openraft::Raft::new(config.node_id, raft_cfg, network, log_store, state_machine)
@@ -71,7 +80,6 @@ impl<S: StorageEngine> RivetNode<S> {
 
         Ok(Self {
             config,
-            storage,
             txn_manager,
             raft,
             registry,
@@ -98,11 +106,22 @@ impl<S: StorageEngine> RivetNode<S> {
         &self.raft
     }
 
-    /// Placeholder for leader-side commit path wiring storage + Raft.
-    pub async fn handle_commit(&self, txn: TransactionMetadata) {
-        let commit_ts = txn.snapshot_ts();
-        let _ = self.storage.validate(&txn).await;
-        let _ = self.storage.commit(&txn, commit_ts).await;
+    pub async fn replicate_commit(
+        &self,
+        prepared: PreparedCommit,
+    ) -> Result<CommitReceipt, CommitError> {
+        let (metadata, writes, commit_ts) = prepared.into_parts();
+        let command = RaftCommand::ApplyTransaction(ReplicatedTransaction {
+            txn_id: metadata.id().clone(),
+            commit_ts,
+            writes,
+        });
+        let payload = encode_command(&command)?;
+        self.raft
+            .client_write(payload)
+            .await
+            .map_err(|err| CommitError::Raft(Box::new(err)))?;
+        Ok(CommitReceipt { commit_ts })
     }
 }
 
