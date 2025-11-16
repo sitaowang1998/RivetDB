@@ -14,7 +14,7 @@ pub mod transaction;
 pub mod types;
 
 pub use client::{ClientConfig, ClientError, ClientTransaction, GetResult, RivetClient};
-pub use config::RivetConfig;
+pub use config::{PeerConfig, RivetConfig};
 pub use node::{NodeError, NodeRole, RivetNode};
 pub use raft::{
     RaftRegistry, RivetNetworkFactory, RivetRaft, RivetRaftConfig, RivetStore, collect_metrics,

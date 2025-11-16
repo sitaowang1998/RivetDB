@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openraft::BasicNode;
@@ -25,6 +26,13 @@ pub enum NodeRole {
 pub enum NodeError {
     #[error("failed to construct Raft core: {0}")]
     Raft(#[from] openraft::error::Fatal<u64>),
+    #[error("failed to initialize Raft membership: {0}")]
+    Initialize(
+        #[from] openraft::error::RaftError<
+            u64,
+            openraft::error::InitializeError<u64, BasicNode>,
+        >,
+    ),
 }
 
 /// High-level node abstraction composing storage + consensus + RPC layers.
@@ -54,6 +62,13 @@ impl<S: StorageEngine> RivetNode<S> {
                 BasicNode::new(config.listen_addr.clone()),
             )
             .await;
+        for peer in &config.raft_peers {
+            registry
+                .set_node_info(peer.node_id, BasicNode::new(peer.listen_addr.clone()))
+                .await;
+        }
+
+        ensure_initial_membership(&raft, &config).await?;
 
         let txn_manager = TransactionManager::new(storage.clone());
 
@@ -91,6 +106,41 @@ impl<S: StorageEngine> RivetNode<S> {
         let commit_ts = txn.snapshot_ts();
         let _ = self.storage.validate(&txn).await;
         let _ = self.storage.commit(&txn, commit_ts).await;
+    }
+}
+
+fn membership_nodes(config: &RivetConfig) -> BTreeMap<u64, BasicNode> {
+    let mut members = BTreeMap::new();
+    members.insert(
+        config.node_id,
+        BasicNode::new(config.listen_addr.clone()),
+    );
+    for peer in &config.raft_peers {
+        if peer.node_id == config.node_id {
+            continue;
+        }
+        members.insert(peer.node_id, BasicNode::new(peer.listen_addr.clone()));
+    }
+    members
+}
+
+async fn ensure_initial_membership(raft: &RivetRaft, config: &RivetConfig) -> Result<(), NodeError> {
+    use openraft::error::InitializeError;
+
+    let members = membership_nodes(config);
+    if members.is_empty() {
+        return Ok(());
+    }
+
+    match raft.initialize(members).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if matches!(err.api_error(), Some(InitializeError::NotAllowed(_))) {
+                Ok(())
+            } else {
+                Err(NodeError::Initialize(err))
+            }
+        }
     }
 }
 

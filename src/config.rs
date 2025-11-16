@@ -14,9 +14,25 @@ pub struct RivetConfig {
     /// Address the RPC server will bind to (e.g. `127.0.0.1:50051`).
     pub listen_addr: String,
     /// Peer Raft endpoints used when establishing the cluster.
-    pub raft_peers: Vec<String>,
+    pub raft_peers: Vec<PeerConfig>,
     /// Optional on-disk path for persisting snapshots and logs.
     pub data_dir: Option<PathBuf>,
+}
+
+/// Definition of a remote Raft peer supplied through configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerConfig {
+    pub node_id: u64,
+    pub listen_addr: String,
+}
+
+impl PeerConfig {
+    pub fn new(node_id: u64, listen_addr: impl Into<String>) -> Self {
+        Self {
+            node_id,
+            listen_addr: listen_addr.into(),
+        }
+    }
 }
 
 impl RivetConfig {
@@ -24,7 +40,7 @@ impl RivetConfig {
     pub fn new(
         node_id: u64,
         listen_addr: impl Into<String>,
-        raft_peers: Vec<String>,
+        raft_peers: Vec<PeerConfig>,
         data_dir: Option<PathBuf>,
     ) -> Self {
         Self {
