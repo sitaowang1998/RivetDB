@@ -122,7 +122,6 @@ async fn cluster_commits_with_follower_down() {
     let leader_clone = leader_node.clone();
     let commit = tokio::spawn(async move { leader_clone.replicate_commit(collected).await });
 
-    sleep(Duration::from_millis(50)).await;
     shutdown_node(follower_id, &nodes, &layout).await;
 
     let receipt = commit
