@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::config::RivetConfig;
 use crate::raft::{
-    RaftCommand, RaftRegistry, ReplicatedTransaction, RivetNetworkFactory, RivetRaft, RivetStore,
-    default_raft_config, encode_command, registry as global_registry,
+    PersistenceError, RaftCommand, RaftRegistry, ReplicatedTransaction, RivetNetworkFactory,
+    RivetRaft, RivetStore, default_raft_config, encode_command, registry as global_registry,
 };
 use crate::storage::StorageEngine;
 use crate::transaction::{CollectedTransaction, CommitReceipt, TransactionManager};
@@ -31,6 +31,8 @@ pub enum NodeError {
     Initialize(
         #[from] openraft::error::RaftError<u64, openraft::error::InitializeError<u64, BasicNode>>,
     ),
+    #[error("failed to bootstrap Raft storage: {0}")]
+    Storage(#[from] PersistenceError),
 }
 
 /// Errors surfaced while replicating a transaction through Raft.
@@ -58,7 +60,8 @@ impl<S: StorageEngine + 'static> RivetNode<S> {
         let registry = global_registry();
         let raft_cfg = default_raft_config();
 
-        let (log_store, state_machine) = RivetStore::handles(storage.clone());
+        let (log_store, state_machine, recovered_ts) =
+            RivetStore::handles(storage.clone(), config.data_dir.clone()).await?;
         let network = RivetNetworkFactory::new(registry.clone());
 
         let raft = openraft::Raft::new(config.node_id, raft_cfg, network, log_store, state_machine)
@@ -79,7 +82,7 @@ impl<S: StorageEngine + 'static> RivetNode<S> {
 
         ensure_initial_membership(&raft, &config).await?;
 
-        let txn_manager = TransactionManager::new(storage.clone());
+        let txn_manager = TransactionManager::new(storage.clone(), recovered_ts);
 
         let mut endpoints = HashMap::new();
         endpoints.insert(config.node_id, config.listen_addr.clone());

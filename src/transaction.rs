@@ -126,10 +126,10 @@ pub struct TransactionManager<S: StorageEngine> {
 }
 
 impl<S: StorageEngine> TransactionManager<S> {
-    pub fn new(storage: Arc<S>) -> Self {
+    pub fn new(storage: Arc<S>, initial_ts: Timestamp) -> Self {
         Self {
             storage,
-            clock: AtomicU64::new(0),
+            clock: AtomicU64::new(initial_ts),
         }
     }
 

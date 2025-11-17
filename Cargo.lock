@@ -1203,6 +1203,7 @@ dependencies = [
  "protoc-bin-vendored",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tonic",
