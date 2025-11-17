@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rivetdb::rpc::server::RivetKvService;
 use rivetdb::rpc::service::rivet_kv_server::RivetKvServer;
 use rivetdb::storage::InMemoryStorage;
 use rivetdb::{ClientConfig, RivetClient, RivetConfig, RivetNode, reset_registry};
+use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -19,10 +21,18 @@ struct TestServer {
 
 impl TestServer {
     async fn spawn() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        Self::spawn_with_addr("127.0.0.1:0".parse().unwrap(), None).await
+    }
+
+    async fn spawn_with_data_dir(data_dir: Option<PathBuf>) -> Self {
+        Self::spawn_with_addr("127.0.0.1:0".parse().unwrap(), data_dir).await
+    }
+
+    async fn spawn_with_addr(addr: SocketAddr, data_dir: Option<PathBuf>) -> Self {
+        let listener = TcpListener::bind(addr)
             .await
             .expect("failed to bind test listener");
-        let addr = listener
+        let bound_addr = listener
             .local_addr()
             .expect("failed to read listener address");
         let incoming = TcpIncoming::from_listener(listener, true, None)
@@ -31,7 +41,7 @@ impl TestServer {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         let storage = Arc::new(InMemoryStorage::new());
-        let config = RivetConfig::new(0, addr.to_string(), Vec::new(), None);
+        let config = RivetConfig::new(0, bound_addr.to_string(), Vec::new(), data_dir);
         let node = Arc::new(
             RivetNode::new(config, storage)
                 .await
@@ -49,7 +59,7 @@ impl TestServer {
         });
 
         Self {
-            addr,
+            addr: bound_addr,
             shutdown: Some(shutdown_tx),
             handle: Some(handle),
         }
@@ -135,6 +145,63 @@ async fn client_abort_discards_writes() {
         "aborted write should not be visible"
     );
     reader.abort().await.expect("abort reader");
+
+    drop(client);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_recovers_after_restart() {
+    reset_registry().await;
+    let tmp = tempdir().expect("create temp dir");
+    let data_dir = tmp.path().join("node");
+
+    let mut server = TestServer::spawn_with_data_dir(Some(data_dir.clone())).await;
+    let endpoint = server.endpoint();
+    let client = RivetClient::connect(ClientConfig::new(endpoint.clone()))
+        .await
+        .expect("client connect");
+
+    let writer = client
+        .begin_transaction("initial-writer")
+        .await
+        .expect("begin writer");
+    writer
+        .put("survive", b"v1".to_vec())
+        .await
+        .expect("stage value");
+    writer.commit().await.expect("commit initial write");
+    drop(client);
+
+    server.shutdown().await;
+    reset_registry().await;
+
+    let mut server = TestServer::spawn_with_data_dir(Some(data_dir)).await;
+    let client = RivetClient::connect(ClientConfig::new(server.endpoint()))
+        .await
+        .expect("client reconnect");
+
+    let reader = client
+        .begin_transaction("reader")
+        .await
+        .expect("begin reader");
+    let value = reader
+        .get("survive")
+        .await
+        .expect("read result")
+        .expect("value present after restart");
+    assert_eq!(value.value, b"v1");
+    reader.abort().await.expect("abort reader");
+
+    let writer = client
+        .begin_transaction("writer-2")
+        .await
+        .expect("begin writer 2");
+    writer
+        .put("survive", b"v2".to_vec())
+        .await
+        .expect("stage new value");
+    writer.commit().await.expect("commit second value");
 
     drop(client);
     server.shutdown().await;

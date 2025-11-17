@@ -5,6 +5,7 @@ use openraft::BasicNode;
 use openraft::ServerState;
 use openraft::error::ClientWriteError;
 use thiserror::Error;
+use tracing::info;
 
 use crate::config::RivetConfig;
 use crate::raft::{
@@ -62,6 +63,10 @@ impl<S: StorageEngine + 'static> RivetNode<S> {
 
         let (log_store, state_machine, recovered_ts) =
             RivetStore::handles(storage.clone(), config.data_dir.clone()).await?;
+        info!(
+            node_id = config.node_id,
+            recovered_ts, "storage recovered for node"
+        );
         let network = RivetNetworkFactory::new(registry.clone());
 
         let raft = openraft::Raft::new(config.node_id, raft_cfg, network, log_store, state_machine)

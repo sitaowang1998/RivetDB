@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
+use tracing::info;
 
 use crate::storage::StorageEngine;
 use crate::types::Timestamp;
@@ -25,13 +26,25 @@ impl RivetStore {
         storage: Arc<S>,
         data_dir: Option<PathBuf>,
     ) -> Result<(RivetLogStore, RivetStateMachine<S>, Timestamp), PersistenceError> {
+        let dir_label = data_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<memory>".into());
         let core = RivetStorageCore::load(data_dir)?;
         let applied = core.data.state.applied_commands.clone();
         let initial_ts = core.data.state.last_commit_ts;
 
-        if !applied.is_empty() {
-            replay_applied_commands(storage.clone(), &applied).await?;
-        }
+        let replayed = if applied.is_empty() {
+            0
+        } else {
+            replay_applied_commands(storage.clone(), &applied).await?
+        };
+        info!(
+            path = %dir_label,
+            replayed_entries = replayed,
+            recovered_commit_ts = initial_ts,
+            "recovered persisted Raft state"
+        );
 
         let core = Arc::new(RwLock::new(core));
         Ok((
@@ -45,7 +58,8 @@ impl RivetStore {
 async fn replay_applied_commands<S: StorageEngine>(
     storage: Arc<S>,
     payloads: &[Vec<u8>],
-) -> Result<(), PersistenceError> {
+) -> Result<usize, PersistenceError> {
+    let mut applied = 0;
     for payload in payloads {
         match decode_command(payload)? {
             RaftCommand::ApplyTransaction(txn) => {
@@ -53,8 +67,9 @@ async fn replay_applied_commands<S: StorageEngine>(
                     .apply_committed(txn.commit_ts, txn.writes)
                     .await
                     .map_err(PersistenceError::from)?;
+                applied += 1;
             }
         }
     }
-    Ok(())
+    Ok(applied)
 }
