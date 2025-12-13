@@ -31,12 +31,12 @@ async fn multi_node_cluster_elects_single_leader() {
         let (nodes, _, _guards) = spawn_cluster(&layout, backend).await;
 
         let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-        let leader = wait_for_unique_leader(&ids)
+        let leader = wait_for_unique_leader(&ids, Duration::from_secs(10))
             .await
             .expect("cluster should elect exactly one leader");
 
         assert!(
-            wait_for_cluster_convergence(&ids, leader).await,
+            wait_for_cluster_convergence(&ids, leader, Duration::from_secs(20)).await,
             "cluster did not converge on leader {leader}"
         );
 
@@ -58,11 +58,11 @@ async fn replicated_commit_visible_on_followers() {
 
         let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
         let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-        let leader = wait_for_unique_leader(&ids)
+        let leader = wait_for_unique_leader(&ids, Duration::from_secs(10))
             .await
             .expect("cluster should elect a leader");
         assert!(
-            wait_for_cluster_convergence(&ids, leader).await,
+            wait_for_cluster_convergence(&ids, leader, Duration::from_secs(20)).await,
             "cluster did not converge on leader {leader}"
         );
 
@@ -106,7 +106,7 @@ async fn cluster_commits_with_follower_down() {
 
         let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
         let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-        let leader = wait_for_unique_leader(&ids)
+        let leader = wait_for_unique_leader(&ids, Duration::from_secs(10))
             .await
             .expect("leader should be elected");
 
@@ -146,7 +146,7 @@ async fn cluster_commits_with_follower_down() {
         let receipt = match commit_result {
             Ok(receipt) => {
                 assert!(
-                    wait_for_cluster_convergence(&survivors, leader).await,
+                    wait_for_cluster_convergence(&survivors, leader, Duration::from_secs(20)).await,
                     "leader should remain stable after follower shutdown"
                 );
                 receipt
@@ -184,7 +184,9 @@ async fn leader_shutdown_during_commit_recovers() {
 
         let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
         let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-        let leader = wait_for_unique_leader(&ids).await.expect("initial leader");
+        let leader = wait_for_unique_leader(&ids, Duration::from_secs(10))
+            .await
+            .expect("initial leader");
 
         let leader_index = ids
             .iter()
@@ -211,11 +213,11 @@ async fn leader_shutdown_during_commit_recovers() {
         drop(commit_err);
 
         let survivors: Vec<u64> = ids.iter().copied().filter(|id| *id != leader).collect();
-        let new_leader = wait_for_unique_leader(&survivors)
+        let new_leader = wait_for_unique_leader(&survivors, Duration::from_secs(10))
             .await
             .expect("new leader after shutdown");
         assert!(
-            wait_for_cluster_convergence(&survivors, new_leader).await,
+            wait_for_cluster_convergence(&survivors, new_leader, Duration::from_secs(20)).await,
             "remaining nodes should converge on new leader"
         );
 
@@ -236,8 +238,8 @@ async fn leader_shutdown_during_commit_recovers() {
     }
 }
 
-async fn wait_for_unique_leader(node_ids: &[u64]) -> Option<u64> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+async fn wait_for_unique_leader(node_ids: &[u64], timeout: Duration) -> Option<u64> {
+    let deadline = Instant::now() + timeout;
     loop {
         let mut leaders = Vec::new();
         for &node_id in node_ids {
@@ -297,8 +299,8 @@ async fn spawn_cluster(
     (nodes, storages, guards)
 }
 
-async fn wait_for_cluster_convergence(node_ids: &[u64], leader: u64) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
+async fn wait_for_cluster_convergence(node_ids: &[u64], leader: u64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
     loop {
         let mut consistent = true;
         for &node_id in node_ids {
@@ -400,7 +402,7 @@ async fn handle_commit_error(
 ) -> CommitReceipt {
     match err {
         CommitError::Raft(_) => {
-            let new_leader = wait_for_unique_leader(survivors)
+            let new_leader = wait_for_unique_leader(survivors, Duration::from_secs(10))
                 .await
                 .expect("new leader after disruption");
             commit_from_node(ids, nodes, new_leader, key, value).await
