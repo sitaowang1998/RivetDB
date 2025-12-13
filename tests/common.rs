@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rivetdb::storage::StorageAdapter;
 use rivetdb::StorageConfig;
+use rivetdb::storage::StorageAdapter;
 use tempfile::TempDir;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

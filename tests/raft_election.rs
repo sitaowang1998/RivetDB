@@ -10,9 +10,7 @@ use rivetdb::CommitReceipt;
 use rivetdb::node::CommitError;
 use rivetdb::storage::{StorageAdapter, StorageEngine};
 use rivetdb::types::Timestamp;
-use rivetdb::{
-    PeerConfig, RivetConfig, RivetNode, collect_metrics, registry, reset_registry,
-};
+use rivetdb::{PeerConfig, RivetConfig, RivetNode, collect_metrics, registry, reset_registry};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 

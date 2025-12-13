@@ -39,7 +39,7 @@ async fn node_recovers_committed_state() {
             .expect("recover node");
         let recovered_manager = recovered_node.transaction_manager();
 
-    let mut reader = recovered_manager.begin_transaction();
+        let mut reader = recovered_manager.begin_transaction();
         let recovered = recovered_manager
             .read(&mut reader, &"persisted".to_string())
             .await
