@@ -263,7 +263,7 @@ fn trim_runs(runs: &[RunMeasurement]) -> TrimmedStats {
     }
 }
 
-fn print_trimmed(name: &str, stats: &TrimmedStats) {
+fn print_trimmed(_name: &str, stats: &TrimmedStats) {
     println!(
         "  trimmed (middle {}): mean {:.2} ms, {:.1} ops/s",
         stats.runs_used, stats.mean_ms, stats.ops_per_sec

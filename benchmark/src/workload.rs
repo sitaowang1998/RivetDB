@@ -32,6 +32,7 @@ pub struct KillPlan {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum KillTarget {
     Leader,
     Node(u64),

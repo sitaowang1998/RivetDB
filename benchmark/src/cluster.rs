@@ -75,14 +75,13 @@ impl BenchmarkCluster {
 
     pub async fn leader_id(&self) -> Result<Option<u64>> {
         for server in &self.servers {
-            if !server.is_running() {
-                continue;
-            }
-
-            if let Some(metrics) = collect_metrics(server.node_id).await {
-                if metrics.state == ServerState::Leader {
-                    return Ok(Some(server.node_id));
-                }
+            if server.is_running()
+                && matches!(
+                    collect_metrics(server.node_id).await,
+                    Some(metrics) if metrics.state == ServerState::Leader
+                )
+            {
+                return Ok(Some(server.node_id));
             }
         }
 
@@ -234,8 +233,8 @@ impl NodeServer {
         let addr = listener
             .local_addr()
             .context("read listener address for launch")?;
-        let incoming =
-            TcpIncoming::from_listener(listener, true, None).context("construct TcpIncoming")?;
+        let incoming = TcpIncoming::from_listener(listener, true, None)
+            .map_err(|err| anyhow!("construct TcpIncoming: {err}"))?;
 
         let node = Arc::new(RivetNode::new(config, storage).await?);
         let service = RivetKvService::new(node.clone());
