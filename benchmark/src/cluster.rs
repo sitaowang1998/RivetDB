@@ -9,6 +9,8 @@ use rivetdb::{
     rpc::server::RivetKvService, rpc::service::rivet_kv_server::RivetKvServer,
     storage::OnDiskStorage,
 };
+use std::fs;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -23,7 +25,12 @@ pub struct BenchmarkCluster {
 }
 
 impl BenchmarkCluster {
-    pub async fn start(node_count: usize) -> Result<Self> {
+    pub async fn start(
+        node_count: usize,
+        storage_root: Option<&Path>,
+        experiment: &str,
+        run_idx: usize,
+    ) -> Result<Self> {
         reset_registry().await;
 
         let mut reserved = Vec::new();
@@ -40,6 +47,11 @@ impl BenchmarkCluster {
 
         let mut servers = Vec::new();
         for (node_id, addr, listener) in reserved {
+            let base_dir = storage_root.map(|root| {
+                root.join(experiment)
+                    .join(format!("run-{run_idx}"))
+                    .join(format!("node-{node_id}"))
+            });
             let peers = layout
                 .iter()
                 .filter(|(peer_id, _)| peer_id != &node_id)
@@ -47,7 +59,7 @@ impl BenchmarkCluster {
                 .collect::<Vec<_>>();
 
             servers.push(
-                NodeServer::start(node_id, addr, listener, peers)
+                NodeServer::start(node_id, addr, listener, peers, base_dir)
                     .await
                     .with_context(|| format!("start node {node_id}"))?,
             );
@@ -144,7 +156,8 @@ struct NodeServer {
     node: Option<Arc<RivetNode<OnDiskStorage>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: Option<JoinHandle<()>>,
-    data_dir: TempDir,
+    data_dir: Option<TempDir>,
+    storage_root: PathBuf,
 }
 
 impl NodeServer {
@@ -153,16 +166,31 @@ impl NodeServer {
         addr: SocketAddr,
         listener: TcpListener,
         peers: Vec<PeerConfig>,
+        base_dir: Option<PathBuf>,
     ) -> Result<Self> {
-        let data_dir = tempfile::tempdir().context("create data dir")?;
-        let storage = Arc::new(OnDiskStorage::open(data_dir.path())?);
+        let (storage_root, data_dir_guard, data_dir_path) = match base_dir {
+            Some(dir) => {
+                if dir.exists() {
+                    fs::remove_dir_all(&dir).ok();
+                }
+                fs::create_dir_all(&dir)?;
+                (dir.clone(), None, dir)
+            }
+            None => {
+                let dir = tempfile::tempdir().context("create data dir")?;
+                let path = dir.path().to_path_buf();
+                (path.clone(), Some(dir), path)
+            }
+        };
+
+        let storage = Arc::new(OnDiskStorage::open(&storage_root)?);
         let config = RivetConfig::new(
             node_id,
             addr.to_string(),
             peers,
-            Some(data_dir.path().to_path_buf()),
+            Some(data_dir_path.clone()),
         )
-        .with_storage(StorageConfig::disk(data_dir.path()));
+        .with_storage(StorageConfig::disk(storage_root.clone()));
         let (node, shutdown_tx, handle) =
             Self::launch(config.clone(), storage.clone(), listener).await?;
 
@@ -174,7 +202,8 @@ impl NodeServer {
             node: Some(node),
             shutdown_tx: Some(shutdown_tx),
             handle: Some(handle),
-            data_dir,
+            data_dir: data_dir_guard,
+            storage_root,
         })
     }
 
@@ -211,7 +240,11 @@ impl NodeServer {
         let listener = TcpListener::bind(self.addr)
             .await
             .with_context(|| format!("bind listener for restart on {}", self.addr))?;
-        self.storage = Arc::new(OnDiskStorage::open(self.data_dir.path())?);
+        if self.data_dir.is_none() {
+            fs::remove_dir_all(&self.storage_root).ok();
+            fs::create_dir_all(&self.storage_root)?;
+        }
+        self.storage = Arc::new(OnDiskStorage::open(&self.storage_root)?);
         let (node, shutdown_tx, handle) =
             Self::launch(self.config.clone(), self.storage.clone(), listener).await?;
 

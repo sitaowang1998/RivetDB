@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use serde::Serialize;
-use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use workload::{KillPlan, KillTarget, RunMeasurement, WorkloadConfig};
@@ -17,31 +16,53 @@ use workload::{KillPlan, KillTarget, RunMeasurement, WorkloadConfig};
 #[derive(Parser, Debug)]
 #[command(name = "rivetdb-benchmark")]
 struct Args {
+    /// Label for this run (used in output).
+    #[arg(long, default_value = "run")]
+    label: String,
+
+    /// Number of read operations to issue.
+    #[arg(long, default_value_t = 0)]
+    reads: usize,
+
+    /// Number of write operations to issue.
+    #[arg(long, default_value_t = 0)]
+    writes: usize,
+
+    /// Number of commits to perform (commit_every is derived).
+    #[arg(long, default_value_t = 1)]
+    commits: usize,
+
     /// Directory to write per-experiment CSV files.
     #[arg(long, default_value = "benchmark/reports/csv")]
     csv_dir: PathBuf,
 
+    /// Optional root directory to place disk storage (e.g. mounted SSD).
+    #[arg(long)]
+    storage_root: Option<PathBuf>,
+
+    /// Seed deterministic data before running (recommended when reads > 0).
+    #[arg(long, default_value_t = false)]
+    seed_data: bool,
+
+    /// Optional op index at which to kill/restart a node.
+    #[arg(long)]
+    kill_at: Option<usize>,
+
+    /// Kill target (`leader` or `node`).
+    #[arg(long, value_enum, default_value_t = KillTargetArg::Leader)]
+    kill_target: KillTargetArg,
+
+    /// Node id to kill when using `--kill-target node`.
+    #[arg(long, default_value_t = 1)]
+    kill_node_id: u64,
+
+    /// Delay in ms before restarting a killed node.
+    #[arg(long, default_value_t = 250)]
+    restart_delay_ms: u64,
+
     /// Number of times to run each experiment (trimmed to the middle 5 when >=7).
     #[arg(long, default_value_t = 7)]
     runs: usize,
-
-    /// Only run the named experiment(s). Defaults to all defined experiments.
-    #[arg(long = "experiment")]
-    experiments: Vec<String>,
-}
-
-struct Experiment {
-    name: String,
-    description: String,
-    workload: WorkloadConfig,
-}
-
-#[derive(Serialize)]
-struct ExperimentReport {
-    name: String,
-    description: String,
-    runs: Vec<RunSnapshot>,
-    trimmed: TrimmedStats,
 }
 
 #[derive(Serialize)]
@@ -52,6 +73,7 @@ struct RunSnapshot {
     reads: usize,
     writes: usize,
     commits: usize,
+    commit_every: usize,
     ops_per_sec: f64,
 }
 
@@ -61,6 +83,14 @@ struct TrimmedStats {
     mean_ms: f64,
     ops_per_sec: f64,
     durations_ms: Vec<u128>,
+}
+
+#[derive(Serialize)]
+struct ExperimentReport {
+    name: String,
+    description: String,
+    runs: Vec<RunSnapshot>,
+    trimmed: TrimmedStats,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -73,135 +103,50 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut plans = default_experiments();
-    if !args.experiments.is_empty() {
-        let wanted = args
-            .experiments
-            .iter()
-            .map(|s| s.to_lowercase())
-            .collect::<Vec<_>>();
-        plans.retain(|plan| wanted.contains(&plan.name.to_lowercase()));
+    let kill = args.kill_at.map(|at| KillPlan {
+        at_op: at,
+        target: args.kill_target.to_target(args.kill_node_id),
+        restart_delay: Duration::from_millis(args.restart_delay_ms),
+    });
+
+    let workload = WorkloadConfig {
+        read_ops: args.reads,
+        write_ops: args.writes,
+        commits: args.commits,
+        requires_seed: args.seed_data,
+        kill,
+    };
+
+    println!("=== {} ===", args.label);
+    let mut runs = Vec::new();
+    for run_idx in 0..args.runs {
+        let measurement = workload::run_workload(
+            &workload,
+            run_idx,
+            args.storage_root.as_deref(),
+            &args.label,
+        )
+        .await?;
+        println!(
+            "  run {:>2}: {:>8.2?} ({:.1} ops/s, reads={}, writes={}, commits={})",
+            run_idx + 1,
+            measurement.duration,
+            measurement.ops as f64 / measurement.duration.as_secs_f64(),
+            measurement.reads,
+            measurement.writes,
+            measurement.commits
+        );
+        runs.push(measurement);
     }
 
-    info!("running {} experiment(s)", plans.len());
-
-    for plan in plans {
-        println!("=== {} ===", plan.name);
-        let mut runs = Vec::new();
-        for run_idx in 0..args.runs {
-            let measurement = workload::run_workload(&plan.workload, run_idx).await?;
-            println!(
-                "  run {:>2}: {:>8.2?} ({:.1} ops/s, reads={}, writes={}, commits={})",
-                run_idx + 1,
-                measurement.duration,
-                measurement.ops as f64 / measurement.duration.as_secs_f64(),
-                measurement.reads,
-                measurement.writes,
-                measurement.commits
-            );
-            runs.push(measurement);
-        }
-
-        let report = summarize(&plan, &runs);
-        print_trimmed(&plan.name, &report.trimmed);
-        write_experiment_csv(&args.csv_dir, &plan.name, &report.runs, &report.trimmed)?;
-    }
+    let report = summarize(&args.label, &runs);
+    print_trimmed(&args.label, &report.trimmed);
+    write_experiment_csv(&args.csv_dir, &args.label, &report.runs, &report.trimmed)?;
 
     Ok(())
 }
 
-fn default_experiments() -> Vec<Experiment> {
-    let mut experiments = Vec::new();
-
-    for commit_every in [10_usize, 100_usize] {
-        experiments.push(Experiment {
-            name: format!("read_1000_commit{commit_every}"),
-            description: "1000 reads; commit frequency adjusted".to_string(),
-            workload: WorkloadConfig {
-                total_ops: 1000,
-                commit_every,
-                read_ratio: 1.0,
-                requires_seed: true,
-                kill: None,
-            },
-        });
-
-        experiments.push(Experiment {
-            name: format!("write_1000_commit{commit_every}"),
-            description: "1000 writes; commit frequency adjusted".to_string(),
-            workload: WorkloadConfig {
-                total_ops: 1000,
-                commit_every,
-                read_ratio: 0.0,
-                requires_seed: false,
-                kill: None,
-            },
-        });
-    }
-
-    let ratios = [0.25_f32, 0.5_f32, 0.75_f32];
-    for ratio in ratios {
-        experiments.push(Experiment {
-            name: format!("mixed_1000ops_10commits_read{:.0}", ratio * 100.0),
-            description: "1000 mixed ops; 10 commits; varying read/write ratio".to_string(),
-            workload: WorkloadConfig {
-                total_ops: 1000,
-                commit_every: 100,
-                read_ratio: ratio,
-                requires_seed: true,
-                kill: None,
-            },
-        });
-    }
-
-    for ratio in ratios {
-        experiments.push(Experiment {
-            name: format!("mixed_100ops_100commits_read{:.0}", ratio * 100.0),
-            description: "100 mixed ops; 100 commits; varying read/write ratio".to_string(),
-            workload: WorkloadConfig {
-                total_ops: 100,
-                commit_every: 1,
-                read_ratio: ratio,
-                requires_seed: true,
-                kill: None,
-            },
-        });
-    }
-
-    let kill_plan = KillPlan {
-        at_op: 500,
-        target: KillTarget::Leader,
-        restart_delay: Duration::from_millis(250),
-    };
-
-    experiments.push(Experiment {
-        name: "kill_restart_reads".to_string(),
-        description: "Kill/restart a server during 1000 reads (100 commits)".to_string(),
-        workload: WorkloadConfig {
-            total_ops: 1000,
-            commit_every: 10,
-            read_ratio: 1.0,
-            requires_seed: true,
-            kill: Some(kill_plan.clone()),
-        },
-    });
-
-    experiments.push(Experiment {
-        name: "kill_restart_writes".to_string(),
-        description: "Kill/restart a server during 1000 writes (100 commits)".to_string(),
-        workload: WorkloadConfig {
-            total_ops: 1000,
-            commit_every: 10,
-            read_ratio: 0.0,
-            requires_seed: false,
-            kill: Some(kill_plan),
-        },
-    });
-
-    experiments
-}
-
-fn summarize(plan: &Experiment, runs: &[RunMeasurement]) -> ExperimentReport {
+fn summarize(label: &str, runs: &[RunMeasurement]) -> ExperimentReport {
     let run_snapshots = runs
         .iter()
         .enumerate()
@@ -212,13 +157,14 @@ fn summarize(plan: &Experiment, runs: &[RunMeasurement]) -> ExperimentReport {
             reads: run.reads,
             writes: run.writes,
             commits: run.commits,
+            commit_every: run.commit_every,
             ops_per_sec: run.ops as f64 / run.duration.as_secs_f64(),
         })
         .collect::<Vec<_>>();
 
     ExperimentReport {
-        name: plan.name.clone(),
-        description: plan.description.clone(),
+        name: label.to_string(),
+        description: String::new(),
         runs: run_snapshots,
         trimmed: trim_runs(runs),
     }
@@ -283,14 +229,21 @@ fn write_experiment_csv(
     let mut file = File::create(&path)?;
     writeln!(
         file,
-        "kind,run,duration_ms,ops,reads,writes,commits,ops_per_sec"
+        "kind,run,duration_ms,ops,reads,writes,commits,commit_every,ops_per_sec"
     )?;
 
     for run in runs {
         writeln!(
             file,
-            "run,{},{},{},{},{},{},{}",
-            run.run, run.duration_ms, run.ops, run.reads, run.writes, run.commits, run.ops_per_sec
+            "run,{},{},{},{},{},{},{},{}",
+            run.run,
+            run.duration_ms,
+            run.ops,
+            run.reads,
+            run.writes,
+            run.commits,
+            run.commit_every,
+            run.ops_per_sec
         )?;
     }
 
@@ -315,4 +268,18 @@ fn write_experiment_csv(
 
     println!("    wrote {}", path.display());
     Ok(())
+}
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum KillTargetArg {
+    Leader,
+    Node,
+}
+
+impl KillTargetArg {
+    fn to_target(self, node_id: u64) -> KillTarget {
+        match self {
+            KillTargetArg::Leader => KillTarget::Leader,
+            KillTargetArg::Node => KillTarget::Node(node_id),
+        }
+    }
 }

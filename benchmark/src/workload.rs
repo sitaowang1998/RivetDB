@@ -17,9 +17,9 @@ const VALUE_SIZE_BYTES: usize = 128;
 
 #[derive(Clone, Debug)]
 pub struct WorkloadConfig {
-    pub total_ops: usize,
-    pub commit_every: usize,
-    pub read_ratio: f32,
+    pub read_ops: usize,
+    pub write_ops: usize,
+    pub commits: usize,
     pub requires_seed: bool,
     pub kill: Option<KillPlan>,
 }
@@ -45,16 +45,29 @@ pub struct RunMeasurement {
     pub reads: usize,
     pub writes: usize,
     pub commits: usize,
+    pub commit_every: usize,
 }
 
-pub async fn run_workload(plan: &WorkloadConfig, run_idx: usize) -> Result<RunMeasurement> {
-    if plan.commit_every == 0 {
-        return Err(anyhow!("commit_every must be greater than zero"));
+pub async fn run_workload(
+    plan: &WorkloadConfig,
+    run_idx: usize,
+    storage_root: Option<&std::path::Path>,
+    experiment: &str,
+) -> Result<RunMeasurement> {
+    if plan.commits == 0 {
+        return Err(anyhow!("commits must be greater than zero"));
     }
 
-    let mut cluster = BenchmarkCluster::start(3).await?;
+    let total_ops = plan.read_ops + plan.write_ops;
+    if total_ops == 0 {
+        return Err(anyhow!("total operations must be greater than zero"));
+    }
 
-    let result = run_workload_inner(plan, run_idx, &mut cluster).await;
+    let commit_every = total_ops.div_ceil(plan.commits).max(1);
+
+    let mut cluster = BenchmarkCluster::start(3, storage_root, experiment, run_idx).await?;
+
+    let result = run_workload_inner(plan, run_idx, &mut cluster, total_ops, commit_every).await;
 
     if let Err(err) = cluster.shutdown().await {
         warn!(error = %err, "failed to shutdown cluster after workload");
@@ -67,6 +80,8 @@ async fn run_workload_inner(
     plan: &WorkloadConfig,
     run_idx: usize,
     cluster: &mut BenchmarkCluster,
+    total_ops: usize,
+    commit_every: usize,
 ) -> Result<RunMeasurement> {
     cluster
         .wait_for_leader(Duration::from_secs(5))
@@ -77,7 +92,7 @@ async fn run_workload_inner(
         seed_sample_data(cluster).await?;
     }
 
-    let mut generator = OperationGenerator::new(plan.read_ratio, run_idx as u64);
+    let mut generator = OperationGenerator::new(plan.read_ops, plan.write_ops, run_idx as u64);
     let mut ops_done = 0;
     let mut reads = 0;
     let mut writes = 0;
@@ -86,7 +101,7 @@ async fn run_workload_inner(
 
     let start = Instant::now();
 
-    while ops_done < plan.total_ops {
+    while ops_done < total_ops {
         if let Some(kill) = plan.kill.as_ref()
             && !kill_triggered
             && ops_done >= kill.at_op
@@ -97,8 +112,8 @@ async fn run_workload_inner(
         }
 
         let mut batch = Vec::new();
-        for _ in 0..plan.commit_every {
-            if ops_done >= plan.total_ops {
+        for _ in 0..commit_every {
+            if ops_done >= total_ops {
                 break;
             }
             batch.push(generator.next(ops_done));
@@ -121,10 +136,11 @@ async fn run_workload_inner(
 
     Ok(RunMeasurement {
         duration,
-        ops: plan.total_ops,
+        ops: total_ops,
         reads,
         writes,
         commits,
+        commit_every,
     })
 }
 
@@ -249,32 +265,29 @@ enum Operation {
 }
 
 struct OperationGenerator {
-    read_ratio: f32,
+    remaining_reads: usize,
+    remaining_writes: usize,
     rng: StdRng,
     write_index: usize,
 }
 
 impl OperationGenerator {
-    fn new(read_ratio: f32, seed: u64) -> Self {
-        let ratio = read_ratio.clamp(0.0, 1.0);
+    fn new(read_ops: usize, write_ops: usize, seed: u64) -> Self {
         Self {
-            read_ratio: ratio,
-            rng: StdRng::seed_from_u64(seed_from(ratio, seed)),
+            remaining_reads: read_ops,
+            remaining_writes: write_ops,
+            rng: StdRng::seed_from_u64(seed_from(read_ops as f32, seed)),
             write_index: 0,
         }
     }
 
     fn next(&mut self, op_index: usize) -> Operation {
-        if self.read_ratio >= 1.0 {
-            return Operation::Read(seed_key(op_index % SEED_KEY_COUNT));
-        }
-        if self.read_ratio <= 0.0 {
-            return self.next_write(op_index);
-        }
-
-        if self.rng.r#gen::<f32>() < self.read_ratio {
+        if self.remaining_reads > 0 && (self.remaining_writes == 0 || self.rng.r#gen::<f32>() < 0.5)
+        {
+            self.remaining_reads -= 1;
             Operation::Read(seed_key(op_index % SEED_KEY_COUNT))
         } else {
+            self.remaining_writes = self.remaining_writes.saturating_sub(1);
             self.next_write(op_index)
         }
     }
