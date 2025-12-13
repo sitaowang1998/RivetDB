@@ -16,6 +16,9 @@ COMMITS="$1"; shift
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CSV_DIR="${CSV_DIR:-$ROOT/reports/csv}"
 RUNS="${RUNS:-7}"
+THREADS="${THREADS:-5}"
+# Default to suppressing openraft chatter; override by setting RUST_LOG yourself.
+export RUST_LOG=${RUST_LOG:-error,openraft=error}
 
 # If you want to use an SSD mount, set STORAGE_ROOT=/mnt/ssd/benchmarks
 STORAGE_ROOT_FLAG=()
@@ -28,6 +31,7 @@ cargo run --release --manifest-path "$ROOT/Cargo.toml" -- \
   --reads "$READS" \
   --writes "$WRITES" \
   --commits "$COMMITS" \
+  --threads "$THREADS" \
   --runs "$RUNS" \
   --csv-dir "$CSV_DIR" \
   "${STORAGE_ROOT_FLAG[@]}" \

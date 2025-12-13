@@ -1,50 +1,58 @@
 # RivetDB Benchmarks
 
-This directory contains a small benchmark harness for RivetDB. It spins up a
-fresh in-process 3-node cluster for each run, seeds deterministic data for any
-read-heavy tests, and exercises the RPC surface via the Rust client. Each node
-uses an on-disk data directory (temp-backed by default) so restarts replay
-state. You can point the storage at a mounted SSD with `--storage-root`.
+This directory contains a small benchmark harness for RivetDB. The executable
+spins up a fresh 3-node cluster per run, seeds deterministic data when reads are
+requested, and talks to the cluster via the Rust client. Storage uses on-disk
+state (temp dirs by default) so restarts replay correctly; pass a mounted SSD
+path if you want to place data elsewhere.
 
-## Experiments
+## Running the runner directly
 
-The runner encodes the following scenarios (each runs 7 times by default and
-reports the middle 5):
+`rivetdb-benchmark` accepts knobs for the basic workload:
 
-- 1000 reads; commit every 10 and 100 operations.
-- 1000 writes; commit every 10 and 100 operations.
-- Mixed workload; 1000 operations, 10 commits; read ratios 25%, 50%, 75%.
-- Mixed workload; 100 operations, 100 commits; read ratios 25%, 50%, 75%.
-- Kill and restart a server midway through 1000 reads (100 commits).
-- Kill and restart a server midway through 1000 writes (100 commits).
-
-## Running
-
-Use the scripts to run experiments (each run executes one experiment 7 times and
-takes the middle 5):
-
-```bash
-# run a single experiment
-./benchmark/scripts/run_experiment.sh <name> [env:STORAGE_ROOT=/mnt/ssd] [env:RUNS=7]
-
-# run all experiments
-# (pick the script for the scenario you want)
+```
+cargo run --release --manifest-path benchmark/Cargo.toml -- \
+  --label read_1000_c25 \
+  --reads 1000 --writes 0 --commits 25 \
+  --threads 5 \
+  --runs 7 \
+  --seed-data \
+  --storage-root /mnt/ssd/rivetdb \
+  --csv-dir benchmark/reports/csv
 ```
 
-Available scripts (call with `--help` for options):
+Key flags:
+- `--label` names the experiment and the CSV file.
+- `--reads/--writes/--commits` set operation counts; commit frequency is derived.
+- `--threads` controls parallel clients (default 5).
+- `--seed-data` preloads deterministic keys so reads have something to fetch.
+- `--storage-root` points on-disk storage at a specific directory (e.g. SSD).
+- `--kill-*` flags allow injecting a kill/restart during the run.
 
-- `read_1000_commit10.sh`
-- `read_1000_commit100.sh`
-- `write_1000_commit10.sh`
-- `write_1000_commit100.sh`
-- `mixed_1000_ops_10_commits_read25.sh|read50.sh|read75.sh`
-- `mixed_100_ops_100_commits_read25.sh|read50.sh|read75.sh`
-- `kill_restart_reads.sh`
-- `kill_restart_writes.sh`
+## Helper scripts
 
-You can set `STORAGE_ROOT=/path/on/ssd` to point on-disk storage at a mounted
-SSD, `CSV_DIR` to change where CSVs land, and `RUNS` to override iteration
-count.
+Scripts live in `benchmark/scripts` and all ultimately call `run_case.sh`. They
+run each experiment 7 times and record the middle 5 in per-test CSV files.
 
-Results: per-experiment CSV files under `benchmark/reports/csv/`, one file per
-test. Use `--csv-dir <path>` to redirect where CSVs land.
+- `read_suite.sh` — 1000 reads, commits {10,25,50,75,100}, seeds data.
+- `write_suite.sh` — 1000 writes, commits {10,25,50,75,100}.
+- `mixed_1000_ops_10_commits.sh` — 1000 ops, 10 commits, read ratios 0..100 step 10.
+- `mixed_100_ops_100_commits.sh` — 100 ops, 100 commits, read ratios 0..100 step 10.
+- `kill_restart_reads.sh` — kill/restart the leader mid-run (1000 reads, 100 commits).
+- `kill_restart_writes.sh` — kill/restart the leader mid-run (1000 writes, 100 commits).
+- `run_experiment.sh <script>` — compatibility shim to call any script above.
+- `thread_scaling_suite.sh` — thread-count sweep (1..5) for 1000 reads, 1000 writes, and 500/500 mixed at 100 commits.
+
+### Script configuration
+
+Environment variables that apply to all scripts:
+- `THREADS` (default 5) sets parallel client workers.
+- `RUNS` (default 7) controls iteration count; the runner trims to the middle 5.
+- `CSV_DIR` (default `benchmark/reports/csv`) changes the report destination.
+- `STORAGE_ROOT` points to a directory for on-disk storage (e.g. SSD mount).
+- `RUST_LOG` overrides logging (default `error,openraft=error` to keep the console clean).
+
+Example: `STORAGE_ROOT=/mnt/ssd THREADS=8 RUNS=9 ./benchmark/scripts/read_suite.sh`.
+
+CSV output is written per experiment under the configured `CSV_DIR`. Each run is
+also printed to stdout along with the trimmed mean of the middle five runs.

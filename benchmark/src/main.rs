@@ -32,6 +32,10 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     commits: usize,
 
+    /// Number of parallel client workers to run.
+    #[arg(long, default_value_t = 5)]
+    threads: usize,
+
     /// Directory to write per-experiment CSV files.
     #[arg(long, default_value = "benchmark/reports/csv")]
     csv_dir: PathBuf,
@@ -99,7 +103,7 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
         )
         .init();
 
@@ -113,6 +117,7 @@ async fn main() -> Result<()> {
         read_ops: args.reads,
         write_ops: args.writes,
         commits: args.commits,
+        threads: args.threads,
         requires_seed: args.seed_data,
         kill,
     };

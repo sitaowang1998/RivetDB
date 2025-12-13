@@ -1,11 +1,16 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rivetdb::{ClientConfig, ClientError, RivetClient};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -20,6 +25,7 @@ pub struct WorkloadConfig {
     pub read_ops: usize,
     pub write_ops: usize,
     pub commits: usize,
+    pub threads: usize,
     pub requires_seed: bool,
     pub kill: Option<KillPlan>,
 }
@@ -65,11 +71,13 @@ pub async fn run_workload(
 
     let commit_every = total_ops.div_ceil(plan.commits).max(1);
 
-    let mut cluster = BenchmarkCluster::start(3, storage_root, experiment, run_idx).await?;
+    let cluster = Arc::new(Mutex::new(
+        BenchmarkCluster::start(3, storage_root, experiment, run_idx).await?,
+    ));
 
-    let result = run_workload_inner(plan, run_idx, &mut cluster, total_ops, commit_every).await;
+    let result = run_workload_inner(plan, run_idx, cluster.clone(), total_ops, commit_every).await;
 
-    if let Err(err) = cluster.shutdown().await {
+    if let Err(err) = cluster.lock().await.shutdown().await {
         warn!(error = %err, "failed to shutdown cluster after workload");
     }
 
@@ -79,57 +87,111 @@ pub async fn run_workload(
 async fn run_workload_inner(
     plan: &WorkloadConfig,
     run_idx: usize,
-    cluster: &mut BenchmarkCluster,
+    cluster: Arc<Mutex<BenchmarkCluster>>,
     total_ops: usize,
     commit_every: usize,
 ) -> Result<RunMeasurement> {
-    cluster
-        .wait_for_leader(Duration::from_secs(5))
-        .await
-        .context("leader election before workload")?;
-
-    if plan.requires_seed {
-        seed_sample_data(cluster).await?;
+    {
+        let cluster = cluster.lock().await;
+        cluster
+            .wait_for_leader(Duration::from_secs(5))
+            .await
+            .context("leader election before workload")?;
     }
 
-    let mut generator = OperationGenerator::new(plan.read_ops, plan.write_ops, run_idx as u64);
-    let mut ops_done = 0;
-    let mut reads = 0;
-    let mut writes = 0;
-    let mut commits = 0;
-    let mut kill_triggered = false;
+    if plan.requires_seed {
+        seed_sample_data(&cluster).await?;
+    }
+
+    let generator = Arc::new(Mutex::new(OperationGenerator::new(
+        plan.read_ops,
+        plan.write_ops,
+        run_idx as u64,
+    )));
+    let ops_claimed = Arc::new(AtomicUsize::new(0));
+    let ops_completed = Arc::new(AtomicUsize::new(0));
+    let read_count = Arc::new(AtomicUsize::new(0));
+    let write_count = Arc::new(AtomicUsize::new(0));
+    let commit_count = Arc::new(AtomicUsize::new(0));
+    let kill_triggered = Arc::new(AtomicBool::new(false));
+    let kill_lock = Arc::new(Mutex::new(()));
 
     let start = Instant::now();
 
-    while ops_done < total_ops {
-        if let Some(kill) = plan.kill.as_ref()
-            && !kill_triggered
-            && ops_done >= kill.at_op
-        {
-            info!(target = ?kill.target, op = ops_done, "injecting failure");
-            kill_node(cluster, kill).await?;
-            kill_triggered = true;
-        }
+    let threads = plan.threads.max(1);
+    let mut handles = Vec::with_capacity(threads);
+    for _ in 0..threads {
+        let generator = generator.clone();
+        let cluster = cluster.clone();
+        let ops_claimed = ops_claimed.clone();
+        let ops_completed = ops_completed.clone();
+        let read_count = read_count.clone();
+        let write_count = write_count.clone();
+        let commit_count = commit_count.clone();
+        let kill_plan = plan.kill.clone();
+        let kill_triggered = kill_triggered.clone();
+        let kill_lock = kill_lock.clone();
 
-        let mut batch = Vec::new();
-        for _ in 0..commit_every {
-            if ops_done >= total_ops {
-                break;
+        let handle = tokio::spawn(async move {
+            loop {
+                let start_idx = ops_claimed.fetch_add(commit_every, Ordering::SeqCst);
+                if start_idx >= total_ops {
+                    break;
+                }
+                let batch_size = (total_ops - start_idx).min(commit_every);
+
+                if let Some(ref kill) = kill_plan
+                    && !kill_triggered.load(Ordering::SeqCst)
+                    && start_idx >= kill.at_op
+                {
+                    let _guard = kill_lock.lock().await;
+                    if !kill_triggered.load(Ordering::SeqCst) && start_idx >= kill.at_op {
+                        info!(target = ?kill.target, op = start_idx, "injecting failure");
+                        kill_triggered.store(true, Ordering::SeqCst);
+                        kill_node(&cluster, kill).await?;
+                    }
+                }
+
+                let mut batch = Vec::with_capacity(batch_size);
+                {
+                    let mut op_gen = generator.lock().await;
+                    for i in 0..batch_size {
+                        batch.push(op_gen.next(start_idx + i));
+                    }
+                }
+
+                let batch_reads = batch
+                    .iter()
+                    .filter(|op| matches!(op, Operation::Read(_)))
+                    .count();
+                let batch_writes = batch.len() - batch_reads;
+
+                execute_transaction(&cluster, &batch).await?;
+                read_count.fetch_add(batch_reads, Ordering::SeqCst);
+                write_count.fetch_add(batch_writes, Ordering::SeqCst);
+                commit_count.fetch_add(1, Ordering::SeqCst);
+                ops_completed.fetch_add(batch_size, Ordering::SeqCst);
             }
-            batch.push(generator.next(ops_done));
-            ops_done += 1;
+            Ok::<(), anyhow::Error>(())
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err),
+            Err(join_err) => return Err(anyhow!("worker panicked: {join_err}")),
         }
+    }
 
-        let batch_reads = batch
-            .iter()
-            .filter(|op| matches!(op, Operation::Read(_)))
-            .count();
-        let batch_writes = batch.len() - batch_reads;
-
-        execute_transaction(cluster, &batch).await?;
-        reads += batch_reads;
-        writes += batch_writes;
-        commits += 1;
+    let completed = ops_completed.load(Ordering::SeqCst);
+    if completed != total_ops {
+        warn!(
+            completed,
+            expected = total_ops,
+            "workload completed a different number of operations than planned"
+        );
     }
 
     let duration = start.elapsed();
@@ -137,14 +199,14 @@ async fn run_workload_inner(
     Ok(RunMeasurement {
         duration,
         ops: total_ops,
-        reads,
-        writes,
-        commits,
+        reads: read_count.load(Ordering::SeqCst),
+        writes: write_count.load(Ordering::SeqCst),
+        commits: commit_count.load(Ordering::SeqCst),
         commit_every,
     })
 }
 
-async fn seed_sample_data(cluster: &BenchmarkCluster) -> Result<()> {
+async fn seed_sample_data(cluster: &Arc<Mutex<BenchmarkCluster>>) -> Result<()> {
     let mut remaining = SEED_KEY_COUNT;
     let mut cursor = 0;
 
@@ -165,7 +227,8 @@ async fn seed_sample_data(cluster: &BenchmarkCluster) -> Result<()> {
     Ok(())
 }
 
-async fn kill_node(cluster: &mut BenchmarkCluster, plan: &KillPlan) -> Result<()> {
+async fn kill_node(cluster: &Arc<Mutex<BenchmarkCluster>>, plan: &KillPlan) -> Result<()> {
+    let mut cluster = cluster.lock().await;
     let target_id = match plan.target {
         KillTarget::Leader => cluster
             .leader_id()
@@ -184,7 +247,10 @@ async fn kill_node(cluster: &mut BenchmarkCluster, plan: &KillPlan) -> Result<()
     Ok(())
 }
 
-async fn execute_transaction(cluster: &BenchmarkCluster, ops: &[Operation]) -> Result<()> {
+async fn execute_transaction(
+    cluster: &Arc<Mutex<BenchmarkCluster>>,
+    ops: &[Operation],
+) -> Result<()> {
     let mut attempts = 0;
     loop {
         attempts += 1;
@@ -246,7 +312,8 @@ async fn run_txn(client: &RivetClient, ops: &[Operation]) -> Result<(), ClientEr
     Ok(())
 }
 
-async fn preferred_endpoint(cluster: &BenchmarkCluster) -> Result<String> {
+async fn preferred_endpoint(cluster: &Arc<Mutex<BenchmarkCluster>>) -> Result<String> {
+    let cluster = cluster.lock().await;
     if let Some(endpoint) = cluster.leader_endpoint().await {
         return Ok(endpoint);
     }
