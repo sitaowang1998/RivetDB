@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use rivetdb::storage::{InMemoryStorage, StorageEngine};
+#[path = "common.rs"]
+mod common;
+
+use common::{TestStorage, all_backends};
+use rivetdb::storage::StorageEngine;
 use rivetdb::transaction::{Snapshot, TransactionMetadata, WriteIntent};
 use rivetdb::types::{Timestamp, TxnId};
 
@@ -75,11 +79,17 @@ async fn abort_discards_staged_write<E: StorageEngine + 'static>(storage: Arc<E>
 }
 
 #[tokio::test]
-async fn in_memory_storage_commit_flow() {
-    commit_flow(Arc::new(InMemoryStorage::new())).await;
+async fn storage_backends_commit_flow() {
+    for backend in all_backends() {
+        let storage = TestStorage::new(backend);
+        commit_flow(storage.storage()).await;
+    }
 }
 
 #[tokio::test]
-async fn in_memory_storage_abort_discards_intent() {
-    abort_discards_staged_write(Arc::new(InMemoryStorage::new())).await;
+async fn storage_backends_abort_discards_intent() {
+    for backend in all_backends() {
+        let storage = TestStorage::new(backend);
+        abort_discards_staged_write(storage.storage()).await;
+    }
 }

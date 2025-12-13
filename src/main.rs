@@ -4,8 +4,8 @@ use std::sync::Arc;
 use clap::Parser;
 use rivetdb::rpc::server::RivetKvService;
 use rivetdb::rpc::service::rivet_kv_server::RivetKvServer;
-use rivetdb::storage::InMemoryStorage;
-use rivetdb::{PeerConfig, RivetConfig, RivetNode};
+use rivetdb::storage::StorageAdapter;
+use rivetdb::{PeerConfig, RivetConfig, RivetNode, StorageBackend, StorageConfig};
 use std::path::PathBuf;
 use tonic::transport::Server;
 use tracing::info;
@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = args.into_config()?;
     info!("starting RivetDB node with config {:?}", config);
 
-    let storage = Arc::new(InMemoryStorage::new());
+    let storage = Arc::new(build_storage(&config)?);
     let node = Arc::new(RivetNode::new(config, storage).await?);
 
     info!("node initialized with role {:?}", node.role());
@@ -61,6 +61,14 @@ struct Cli {
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
+    /// Storage backend to use (`memory` or `disk`).
+    #[arg(long, value_enum, default_value_t = StorageEngineArg::Memory)]
+    storage: StorageEngineArg,
+
+    /// Optional path for on-disk storage (required when `--storage disk`).
+    #[arg(long)]
+    storage_path: Option<PathBuf>,
+
     /// Peer definitions in the form `<id>=<addr>`, e.g. `1=127.0.0.1:6001`.
     #[arg(long = "peer")]
     peers: Vec<String>,
@@ -73,13 +81,27 @@ impl Cli {
             .iter()
             .map(|peer| parse_peer(peer))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(RivetConfig::new(
-            self.node_id,
-            self.listen_addr,
-            peers,
-            self.data_dir,
-        ))
+        let storage_cfg = match self.storage {
+            StorageEngineArg::Memory => StorageConfig::memory(),
+            StorageEngineArg::Disk => {
+                let path = self.storage_path.clone().ok_or_else(|| {
+                    "storage_path is required when using disk storage".to_string()
+                })?;
+                StorageConfig::disk(path)
+            }
+        };
+
+        Ok(
+            RivetConfig::new(self.node_id, self.listen_addr, peers, self.data_dir)
+                .with_storage(storage_cfg),
+        )
     }
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum StorageEngineArg {
+    Memory,
+    Disk,
 }
 
 fn parse_peer(input: &str) -> Result<PeerConfig, String> {
@@ -90,4 +112,22 @@ fn parse_peer(input: &str) -> Result<PeerConfig, String> {
         .parse::<u64>()
         .map_err(|err| format!("invalid peer id '{id_part}': {err}"))?;
     Ok(PeerConfig::new(node_id, addr_part.to_string()))
+}
+
+fn build_storage(config: &RivetConfig) -> Result<StorageAdapter, String> {
+    match config.storage.backend {
+        StorageBackend::Memory => Ok(StorageAdapter::memory()),
+        StorageBackend::Disk => {
+            let path = config
+                .storage
+                .path
+                .clone()
+                .or_else(|| config.data_dir.clone())
+                .ok_or_else(|| {
+                    "storage path is required for disk storage (provide --storage-path)".to_string()
+                })?;
+            StorageAdapter::disk(path)
+                .map_err(|err| format!("failed to initialize disk storage: {err}"))
+        }
+    }
 }

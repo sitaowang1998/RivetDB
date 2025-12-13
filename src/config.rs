@@ -17,6 +17,8 @@ pub struct RivetConfig {
     pub raft_peers: Vec<PeerConfig>,
     /// Optional on-disk path for persisting snapshots and logs.
     pub data_dir: Option<PathBuf>,
+    /// Storage backend configuration.
+    pub storage: StorageConfig,
 }
 
 /// Definition of a remote Raft peer supplied through configuration.
@@ -48,7 +50,13 @@ impl RivetConfig {
             listen_addr: listen_addr.into(),
             raft_peers,
             data_dir,
+            storage: StorageConfig::memory(),
         }
+    }
+
+    pub fn with_storage(mut self, storage: StorageConfig) -> Self {
+        self.storage = storage;
+        self
     }
 }
 
@@ -59,6 +67,37 @@ impl Default for RivetConfig {
             listen_addr: "127.0.0.1:50051".into(),
             raft_peers: Vec::new(),
             data_dir: None,
+            storage: StorageConfig::memory(),
+        }
+    }
+}
+
+/// Supported storage backends.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StorageBackend {
+    Memory,
+    Disk,
+}
+
+/// Storage configuration specifying the backend and optional path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageConfig {
+    pub backend: StorageBackend,
+    pub path: Option<PathBuf>,
+}
+
+impl StorageConfig {
+    pub fn memory() -> Self {
+        Self {
+            backend: StorageBackend::Memory,
+            path: None,
+        }
+    }
+
+    pub fn disk(path: impl Into<PathBuf>) -> Self {
+        Self {
+            backend: StorageBackend::Disk,
+            path: Some(path.into()),
         }
     }
 }

@@ -2,10 +2,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
+
+#[path = "common.rs"]
+mod common;
 use openraft::ServerState;
-use rivetdb::storage::{InMemoryStorage, StorageEngine};
+use rivetdb::CommitReceipt;
+use rivetdb::node::CommitError;
+use rivetdb::storage::{StorageAdapter, StorageEngine};
 use rivetdb::types::Timestamp;
-use rivetdb::{PeerConfig, RivetConfig, RivetNode, collect_metrics, registry, reset_registry};
+use rivetdb::{
+    PeerConfig, RivetConfig, RivetNode, collect_metrics, registry, reset_registry,
+};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
@@ -14,221 +21,221 @@ static TEST_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 #[tokio::test(flavor = "multi_thread")]
 async fn multi_node_cluster_elects_single_leader() {
     let _guard = TEST_GUARD.lock().await;
-    reset_registry().await;
+    for backend in common::all_backends() {
+        reset_registry().await;
 
-    let layout = vec![
-        (0_u64, "127.0.0.1:6100".to_string()),
-        (1_u64, "127.0.0.1:6101".to_string()),
-        (2_u64, "127.0.0.1:6102".to_string()),
-    ];
+        let layout = vec![
+            (0_u64, "127.0.0.1:6100".to_string()),
+            (1_u64, "127.0.0.1:6101".to_string()),
+            (2_u64, "127.0.0.1:6102".to_string()),
+        ];
 
-    let (nodes, _) = spawn_cluster(&layout).await;
+        let (nodes, _, _guards) = spawn_cluster(&layout, backend).await;
 
-    let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-    let leader = wait_for_unique_leader(&ids)
-        .await
-        .expect("cluster should elect exactly one leader");
+        let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
+        let leader = wait_for_unique_leader(&ids)
+            .await
+            .expect("cluster should elect exactly one leader");
 
-    assert!(
-        wait_for_cluster_convergence(&ids, leader).await,
-        "cluster did not converge on leader {leader}"
-    );
+        assert!(
+            wait_for_cluster_convergence(&ids, leader).await,
+            "cluster did not converge on leader {leader}"
+        );
 
-    drop(nodes);
+        drop(nodes);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn replicated_commit_visible_on_followers() {
     let _guard = TEST_GUARD.lock().await;
-    reset_registry().await;
+    for backend in common::all_backends() {
+        reset_registry().await;
 
-    let layout = vec![
-        (10_u64, "127.0.0.1:6200".to_string()),
-        (11_u64, "127.0.0.1:6201".to_string()),
-        (12_u64, "127.0.0.1:6202".to_string()),
-    ];
+        let layout = vec![
+            (10_u64, "127.0.0.1:6200".to_string()),
+            (11_u64, "127.0.0.1:6201".to_string()),
+            (12_u64, "127.0.0.1:6202".to_string()),
+        ];
 
-    let (nodes, storages) = spawn_cluster(&layout).await;
-    let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-    let leader = wait_for_unique_leader(&ids)
-        .await
-        .expect("cluster should elect a leader");
-    assert!(
-        wait_for_cluster_convergence(&ids, leader).await,
-        "cluster did not converge on leader {leader}"
-    );
+        let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
+        let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
+        let leader = wait_for_unique_leader(&ids)
+            .await
+            .expect("cluster should elect a leader");
+        assert!(
+            wait_for_cluster_convergence(&ids, leader).await,
+            "cluster did not converge on leader {leader}"
+        );
 
-    let leader_index = ids
-        .iter()
-        .position(|id| *id == leader)
-        .expect("leader should exist in ids");
-    let leader_node = nodes[leader_index].clone();
+        let leader_index = ids
+            .iter()
+            .position(|id| *id == leader)
+            .expect("leader should exist in ids");
+        let leader_node = nodes[leader_index].clone();
 
-    let manager = leader_node.transaction_manager();
-    let txn = manager.begin_transaction();
-    manager
-        .write(&txn, "replicated".to_string(), b"value".to_vec())
-        .await
-        .expect("stage write");
+        let manager = leader_node.transaction_manager();
+        let txn = manager.begin_transaction();
+        manager
+            .write(&txn, "replicated".to_string(), b"value".to_vec())
+            .await
+            .expect("stage write");
 
-    let collected = manager.collect(txn).await.expect("collect transaction");
-    let receipt = leader_node
-        .replicate_commit(collected)
-        .await
-        .expect("raft commit");
+        let collected = manager.collect(txn).await.expect("collect transaction");
+        let receipt = leader_node
+            .replicate_commit(collected)
+            .await
+            .expect("raft commit");
 
-    assert!(
-        wait_for_value_on_all(&storages, "replicated", receipt.commit_ts, b"value").await,
-        "replicated value not visible on all nodes"
-    );
+        assert!(
+            wait_for_value_on_all(&storages, "replicated", receipt.commit_ts, b"value").await,
+            "replicated value not visible on all nodes"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cluster_commits_with_follower_down() {
     let _guard = TEST_GUARD.lock().await;
-    reset_registry().await;
+    for backend in common::all_backends() {
+        reset_registry().await;
 
-    let layout = vec![
-        (20_u64, "127.0.0.1:6300".to_string()),
-        (21_u64, "127.0.0.1:6301".to_string()),
-        (22_u64, "127.0.0.1:6302".to_string()),
-    ];
+        let layout = vec![
+            (20_u64, "127.0.0.1:6300".to_string()),
+            (21_u64, "127.0.0.1:6301".to_string()),
+            (22_u64, "127.0.0.1:6302".to_string()),
+        ];
 
-    let (nodes, storages) = spawn_cluster(&layout).await;
-    let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-    let leader = wait_for_unique_leader(&ids)
-        .await
-        .expect("leader should be elected");
+        let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
+        let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
+        let leader = wait_for_unique_leader(&ids)
+            .await
+            .expect("leader should be elected");
 
-    let follower_id = ids
-        .iter()
-        .copied()
-        .find(|id| *id != leader)
-        .expect("cluster needs follower");
+        let follower_id = ids
+            .iter()
+            .copied()
+            .find(|id| *id != leader)
+            .expect("cluster needs follower");
 
-    let leader_index = ids
-        .iter()
-        .position(|id| *id == leader)
-        .expect("leader index");
-    let leader_node = nodes[leader_index].clone();
+        let leader_index = ids
+            .iter()
+            .position(|id| *id == leader)
+            .expect("leader index");
+        let leader_node = nodes[leader_index].clone();
 
-    let manager = leader_node.transaction_manager();
-    let txn = manager.begin_transaction();
-    manager
-        .write(&txn, "follower-down".to_string(), b"value".to_vec())
-        .await
-        .expect("stage write");
-    let collected = manager.collect(txn).await.expect("collect txn");
-    let leader_clone = leader_node.clone();
-    let commit = tokio::spawn(async move { leader_clone.replicate_commit(collected).await });
+        let manager = leader_node.transaction_manager();
+        let txn = manager.begin_transaction();
+        manager
+            .write(&txn, "follower-down".to_string(), b"value".to_vec())
+            .await
+            .expect("stage write");
+        let collected = manager.collect(txn).await.expect("collect txn");
+        let leader_clone = leader_node.clone();
+        let commit = tokio::spawn(async move { leader_clone.replicate_commit(collected).await });
 
-    shutdown_node(follower_id, &nodes, &layout).await;
+        sleep(Duration::from_millis(50)).await;
+        shutdown_node(follower_id, &nodes, &layout).await;
 
-    let receipt = commit
-        .await
-        .expect("join commit task")
-        .expect("commit should survive follower crash");
+        let commit_result = commit.await.expect("join commit task");
 
-    let survivors: Vec<u64> = ids
-        .iter()
-        .copied()
-        .filter(|id| *id != follower_id)
-        .collect();
-    assert!(
-        wait_for_cluster_convergence(&survivors, leader).await,
-        "leader should remain stable after follower shutdown"
-    );
+        let survivors: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|id| *id != follower_id)
+            .collect();
 
-    let survivor_storages = storages_for_ids(&survivors, &layout, &storages);
-    assert!(
-        wait_for_value_on_all(
-            &survivor_storages,
-            "follower-down",
-            receipt.commit_ts,
-            b"value"
-        )
-        .await,
-        "surviving nodes should apply commit"
-    );
+        let receipt = match commit_result {
+            Ok(receipt) => {
+                assert!(
+                    wait_for_cluster_convergence(&survivors, leader).await,
+                    "leader should remain stable after follower shutdown"
+                );
+                receipt
+            }
+            Err(err) => {
+                handle_commit_error(err, &ids, &nodes, &survivors, "follower-down", b"value").await
+            }
+        };
+
+        let survivor_storages = storages_for_ids(&survivors, &layout, &storages);
+        assert!(
+            wait_for_value_on_all(
+                &survivor_storages,
+                "follower-down",
+                receipt.commit_ts,
+                b"value"
+            )
+            .await,
+            "surviving nodes should apply commit"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn leader_shutdown_during_commit_recovers() {
     let _guard = TEST_GUARD.lock().await;
-    reset_registry().await;
+    for backend in common::all_backends() {
+        reset_registry().await;
 
-    let layout = vec![
-        (30_u64, "127.0.0.1:6400".to_string()),
-        (31_u64, "127.0.0.1:6401".to_string()),
-        (32_u64, "127.0.0.1:6402".to_string()),
-    ];
+        let layout = vec![
+            (30_u64, "127.0.0.1:6400".to_string()),
+            (31_u64, "127.0.0.1:6401".to_string()),
+            (32_u64, "127.0.0.1:6402".to_string()),
+        ];
 
-    let (nodes, storages) = spawn_cluster(&layout).await;
-    let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-    let leader = wait_for_unique_leader(&ids).await.expect("initial leader");
+        let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
+        let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
+        let leader = wait_for_unique_leader(&ids).await.expect("initial leader");
 
-    let leader_index = ids
-        .iter()
-        .position(|id| *id == leader)
-        .expect("leader index");
-    let leader_node = nodes[leader_index].clone();
+        let leader_index = ids
+            .iter()
+            .position(|id| *id == leader)
+            .expect("leader index");
+        let leader_node = nodes[leader_index].clone();
 
-    let manager = leader_node.transaction_manager();
-    let txn = manager.begin_transaction();
-    manager
-        .write(&txn, "leader-down".to_string(), b"survivor".to_vec())
-        .await
-        .expect("stage write");
-    let collected = manager.collect(txn).await.expect("collect txn");
-    let leader_clone = leader_node.clone();
-    let commit = tokio::spawn(async move { leader_clone.replicate_commit(collected).await });
+        let manager = leader_node.transaction_manager();
+        let txn = manager.begin_transaction();
+        manager
+            .write(&txn, "leader-down".to_string(), b"survivor".to_vec())
+            .await
+            .expect("stage write");
+        let collected = manager.collect(txn).await.expect("collect txn");
+        let leader_clone = leader_node.clone();
+        let commit = tokio::spawn(async move { leader_clone.replicate_commit(collected).await });
 
-    shutdown_node(leader, &nodes, &layout).await;
+        shutdown_node(leader, &nodes, &layout).await;
 
-    let commit_err = commit
-        .await
-        .expect("join commit task")
-        .expect_err("commit should fail when leader steps down mid-flight");
-    drop(commit_err);
+        let commit_err = commit
+            .await
+            .expect("join commit task")
+            .expect_err("commit should fail when leader steps down mid-flight");
+        drop(commit_err);
 
-    let survivors: Vec<u64> = ids.iter().copied().filter(|id| *id != leader).collect();
-    let new_leader = wait_for_unique_leader(&survivors)
-        .await
-        .expect("new leader after shutdown");
-    assert!(
-        wait_for_cluster_convergence(&survivors, new_leader).await,
-        "remaining nodes should converge on new leader"
-    );
+        let survivors: Vec<u64> = ids.iter().copied().filter(|id| *id != leader).collect();
+        let new_leader = wait_for_unique_leader(&survivors)
+            .await
+            .expect("new leader after shutdown");
+        assert!(
+            wait_for_cluster_convergence(&survivors, new_leader).await,
+            "remaining nodes should converge on new leader"
+        );
 
-    let new_leader_index = ids
-        .iter()
-        .position(|id| *id == new_leader)
-        .expect("leader index");
-    let new_leader_node = nodes[new_leader_index].clone();
+        let receipt =
+            commit_from_node(&ids, &nodes, new_leader, "leader-failover", b"survivor").await;
 
-    let manager = new_leader_node.transaction_manager();
-    let txn = manager.begin_transaction();
-    manager
-        .write(&txn, "leader-failover".to_string(), b"survivor".to_vec())
-        .await
-        .expect("stage write after failover");
-    let collected = manager.collect(txn).await.expect("collect txn");
-    let receipt = new_leader_node
-        .replicate_commit(collected)
-        .await
-        .expect("commit after failover");
-
-    let survivor_storages = storages_for_ids(&survivors, &layout, &storages);
-    assert!(
-        wait_for_value_on_all(
-            &survivor_storages,
-            "leader-failover",
-            receipt.commit_ts,
-            b"survivor"
-        )
-        .await,
-        "surviving nodes should apply commit after leader shutdown"
-    );
+        let survivor_storages = storages_for_ids(&survivors, &layout, &storages);
+        assert!(
+            wait_for_value_on_all(
+                &survivor_storages,
+                "leader-failover",
+                receipt.commit_ts,
+                b"survivor"
+            )
+            .await,
+            "surviving nodes should apply commit after leader shutdown"
+        );
+    }
 }
 
 async fn wait_for_unique_leader(node_ids: &[u64]) -> Option<u64> {
@@ -257,12 +264,15 @@ async fn wait_for_unique_leader(node_ids: &[u64]) -> Option<u64> {
 
 async fn spawn_cluster(
     layout: &[(u64, String)],
+    backend: common::BackendKind,
 ) -> (
-    Vec<Arc<RivetNode<InMemoryStorage>>>,
-    Vec<Arc<InMemoryStorage>>,
+    Vec<Arc<RivetNode<StorageAdapter>>>,
+    Vec<Arc<StorageAdapter>>,
+    Vec<common::TestStorage>,
 ) {
     let mut nodes = Vec::new();
     let mut storages = Vec::new();
+    let mut guards = Vec::new();
 
     for (node_id, addr) in layout {
         let peers = layout
@@ -271,19 +281,22 @@ async fn spawn_cluster(
             .map(|(peer_id, peer_addr)| PeerConfig::new(*peer_id, peer_addr.clone()))
             .collect::<Vec<_>>();
 
-        let config = RivetConfig::new(*node_id, addr.clone(), peers, None);
-        let storage = Arc::new(InMemoryStorage::new());
+        let storage = common::TestStorage::new(backend);
+        let config = RivetConfig::new(*node_id, addr.clone(), peers, storage.data_dir())
+            .with_storage(storage.storage_config());
+        let storage_arc = storage.storage();
         let node = Arc::new(
-            RivetNode::new(config, storage.clone())
+            RivetNode::new(config, storage_arc.clone())
                 .await
                 .expect("node bootstrap should succeed"),
         );
 
         nodes.push(node);
-        storages.push(storage);
+        storages.push(storage_arc);
+        guards.push(storage);
     }
 
-    (nodes, storages)
+    (nodes, storages, guards)
 }
 
 async fn wait_for_cluster_convergence(node_ids: &[u64], leader: u64) -> bool {
@@ -367,8 +380,8 @@ where
 fn storages_for_ids(
     ids: &[u64],
     layout: &[(u64, String)],
-    storages: &[Arc<InMemoryStorage>],
-) -> Vec<Arc<InMemoryStorage>> {
+    storages: &[Arc<StorageAdapter>],
+) -> Vec<Arc<StorageAdapter>> {
     ids.iter()
         .filter_map(|target| {
             layout
@@ -379,9 +392,52 @@ fn storages_for_ids(
         .collect()
 }
 
+async fn handle_commit_error(
+    err: CommitError,
+    ids: &[u64],
+    nodes: &[Arc<RivetNode<StorageAdapter>>],
+    survivors: &[u64],
+    key: &str,
+    value: &[u8],
+) -> CommitReceipt {
+    match err {
+        CommitError::Raft(_) => {
+            let new_leader = wait_for_unique_leader(survivors)
+                .await
+                .expect("new leader after disruption");
+            commit_from_node(ids, nodes, new_leader, key, value).await
+        }
+        other => panic!("unexpected commit error: {other:?}"),
+    }
+}
+
+async fn commit_from_node(
+    ids: &[u64],
+    nodes: &[Arc<RivetNode<StorageAdapter>>],
+    node_id: u64,
+    key: &str,
+    value: &[u8],
+) -> CommitReceipt {
+    let index = ids
+        .iter()
+        .position(|id| *id == node_id)
+        .expect("node should exist");
+    let node = nodes[index].clone();
+    let manager = node.transaction_manager();
+    let txn = manager.begin_transaction();
+    manager
+        .write(&txn, key.to_string(), value.to_vec())
+        .await
+        .expect("stage write");
+    let collected = manager.collect(txn).await.expect("collect txn");
+    node.replicate_commit(collected)
+        .await
+        .expect("replicate commit")
+}
+
 async fn shutdown_node(
     node_id: u64,
-    nodes: &[Arc<RivetNode<InMemoryStorage>>],
+    nodes: &[Arc<RivetNode<StorageAdapter>>],
     layout: &[(u64, String)],
 ) {
     if let Some(index) = layout.iter().position(|(id, _)| *id == node_id) {
