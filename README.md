@@ -1,142 +1,185 @@
-# RivetDB: Distributed Versioned Key-Value Store with MVCC and Raft Replication
+# RivetDB Final Report
+
+## Team
+- Sitao Wang - 1003695101 - sitao.wang@mail.utoronto.ca
 
 ## Motivation
+Operational experience with a distributed task system showed that bolting MariaDB onto a coordination plane created latency, lock contention, and scaling pain. RivetDB explores a lighter path: a transactional, Raft-replicated key-value store with MVCC so readers stay fast and writers are validated optimistically. The goal is a compact, educational prototype that demonstrates the building blocks of distributed databases without a heavyweight dependency footprint.
 
-This project arises from experience building a [distributed task execution system] where nodes
-needed a transactional database for coordinating task states. The system initially relied on 
-`MariaDB`, but performance quickly became problematic. MariaDB introduced latency and contention
-under distributed workloads. To address these limitations, this project proposes **RivetDB**, a
-lightweight, transactional, distributed key-value database that combines **Multi-Version Concurrency
-Control (MVCC)** with **Raft replication**. The system maintains strong consistency and fault 
-tolerance while remaining compact.
+## Objectives
+- Provide a transactional key-value API (`begin_transaction`, `get`, `put`, `commit`, `abort`) that enforces snapshot isolation.
+- Replicate commits through Raft to guarantee durability and leader failover.
+- Offer both in-memory and file-backed storage engines to exercise MVCC flows and persistence.
+- Deliver reproducible builds, tests, and benchmarks that run on Ubuntu/macOS without manual tooling installs.
 
-## Objectives and Key Features
+## Features
+- **gRPC transactional API** (`proto/rivetdb.proto`, `src/rpc/server.rs`): begin/get/put/commit/abort plus follower-to-leader forwarding when clients talk to a follower.
+- **MVCC storage engines** (`src/storage`): version chains per key with snapshot reads, OCC validation, staged writes, commit application, and abort cleanup. Both `InMemoryStorage` and JSON-backed `OnDiskStorage` are selectable at runtime via `StorageAdapter`.
+- **Transaction manager** (`src/transaction.rs`): tracks snapshots, read sets, staged writes, validation, and commit timestamp allocation.
+- **Raft replication** (`src/raft`): OpenRaft-backed log store, state machine that replays `ApplyTransaction` commands into the storage engine, membership tracking, leader election, snapshot scaffolding, and in-memory transport for tests.
+- **Node runtime and CLI** (`src/main.rs`, `src/config.rs`): start a node with `--node-id`, `--listen-addr`, `--peer` definitions, and `--storage` backend selection. Exposes leader endpoint hints for clients.
+- **Rust client library** (`src/client.rs`, `docs/client.md`): ergonomic async wrapper over the gRPC service with typed errors and transaction helpers.
+- **Resilience and recovery**: disk-backed runs persist Raft state and MVCC versions; restart tests verify recovery (see `tests/recovery.rs`). Followers forward commits to the leader and block serving when in learner state.
+- **Test coverage**: unit and integration suites exercise MVCC invariants, transaction conflicts, Raft leader election/failover, follower commit forwarding, client abort semantics, and restart recovery.
+- **Benchmark harness** (`benchmark/`): spins up fresh 3-node clusters per run, seeds data, and records CSV results for multiple workloads; scripts trim to the middle five of seven runs.
 
-### Objective
-Build a minimal, correct, and fault-tolerant distributed key-value store with transactional
-semantics. The system will demonstrate the core mechanisms behind distributed databases—versioning,
-optimistic concurrency, replication, and recovery.
+## Performance Benchmarks
+- **Environment**: Ubuntu 22.04 on dual-socket Intel Xeon E5-2630 v3 (2.40GHz, 32 vCPUs), SSD-backed storage.
+- **Methodology**: Each benchmark script (see `benchmark/README.md`) spins up a fresh 3-node Raft cluster, runs the workload, tears it down, and repeats for 7 iterations. Results below use the trimmed mean (middle 5) of `duration_ms` converted to ops/s (1000 ops per run), with disk-backed storage in temp dirs by default.
+- **Graphs**: Mermaid lacks a native line chart; recommended charts are line plots of throughput (ops/s) vs commit interval/read ratio/thread count using the tables below. If you prefer, I can render Mermaid flow-based visuals, but the data here is ready for a plotting tool.
 
-### Key features
+### Commit frequency impact
+![Commit frequency impact](benchmark/reports/graphs/commit_frequency.png)
+| Workload | Commit interval (ops) | Throughput (ops/s) | Trimmed duration (ms) |
+| --- | --- | --- | --- |
+| Read-only | 10 | 6418.5 | 155.8 |
+| Read-only | 25 | 3255.2 | 307.2 |
+| Read-only | 50 | 1794.0 | 557.4 |
+| Read-only | 75 | 1357.6 | 736.6 |
+| Read-only | 100 | 992.5 | 1007.6 |
+| Write-only | 10 | 3819.7 | 261.8 |
+| Write-only | 25 | 1531.4 | 653.0 |
+| Write-only | 50 | 926.8 | 1079.0 |
+| Write-only | 75 | 696.8 | 1435.2 |
+| Write-only | 100 | 524.5 | 1906.6 |
 
-* **Transactional key-value API** with `GET`, `PUT`, `BEGIN_TRANSACTION`, `COMMIT`, and `ABORT`.
-* **MVCC (Multi-Version Concurrency Control)** for snapshot isolation and non-blocking reads.
-* **Optimistic Concurrency Control (OCC)** for validating transactions at commit time.
-* **Raft replication** to ensure strong consistency and durability across replicas.
-* **Crash safety:** Only committed transactions are replicated; uncommitted changes are never
-  applied.
+Takeaway: frequent commits still help throughput, especially for writes (3.8k ops/s at 10-op commits down to ~525 ops/s at 100-op commits); batching beyond ~50 ops/commit degrades throughput as Raft entries grow and validation windows widen.
 
-## System Architecture
+### Read/write mix (100 commits, 1000 ops)
+![Read/write mix](benchmark/reports/graphs/read_write_ratio.png)
+| Read ratio (%) | Throughput (ops/s) | Trimmed duration (ms) |
+| --- | --- | --- |
+| 0 | 448.9 | 2227.6 |
+| 10 | 412.6 | 2423.4 |
+| 20 | 487.5 | 2051.4 |
+| 30 | 547.3 | 1827.2 |
+| 40 | 538.0 | 1858.6 |
+| 50 | 548.8 | 1822.2 |
+| 60 | 570.9 | 1751.6 |
+| 70 | 601.3 | 1663.0 |
+| 80 | 673.9 | 1483.8 |
+| 90 | 819.7 | 1220.0 |
+| 100 | 1016.9 | 983.4 |
 
-The system has three major components:
+Takeaway: throughput rises steadily as the workload skews toward reads (roughly 2.3x from 0% to 100% reads); snapshot reads stay cheap while writes pay OCC validation and Raft replication costs.
 
-1. **Client Library:** A Rust client that manages transaction contexts, assigns transaction IDs, and
-   sends operations to the cluster leader.
-2. **Storage Node:** Each node stores versioned key-value data and maintains a Raft state machine.
-   The Raft leader appends commit records and coordinates replication.
-3. **Coordinator Role:** The leader of the Raft group acts as the coordinator, validating and
-   committing transactions.
+### Thread scaling (100 commits, 1000 ops)
+![Thread scaling](benchmark/reports/graphs/scalability.png)
+| Threads | Read throughput (ops/s) | Write throughput (ops/s) | 50/50 mixed throughput (ops/s) |
+| --- | --- | --- | --- |
+| 1 | 504.0 | 306.1 | 323.2 |
+| 2 | 748.3 | 402.1 | 424.8 |
+| 3 | 861.9 | 437.9 | 485.9 |
+| 4 | 923.2 | 505.8 | 523.5 |
+| 5 | 982.9 | 510.1 | 555.7 |
 
-All data changes pass through Raft replication, guaranteeing atomic and consistent updates even in
-the presence of node crashes. Each node can reconstruct its state entirely from the Raft log,
-ensuring durability without needing a separate write-ahead log.
+Takeaway: scaling is near-linear up to ~4 threads; saturation appears by 5 threads (reads ~0.98k ops/s), consistent with a single-leader commit bottleneck.
 
-## Concurrency Control and Transactions
+### Kill/restart resilience (leader killed mid-run)
+| Workload | Scenario | Throughput (ops/s) | Trimmed duration (ms) |
+| --- | --- | --- | --- | --- | --- |
+| 100% reads, 100 commits | Baseline (no failure) | 992.5 | 1007.6 |
+| 100% reads, 100 commits | Leader kill/restart | 746.2 | 1340.2 |
+| 100% writes, 100 commits | Baseline (no failure) | 524.5 | 1906.6 |
+| 100% writes, 100 commits | Leader kill/restart | 427.6 | 2338.6 |
 
-RivetDB uses MVCC combined with optimistic concurrency control (OCC) to manage concurrent
-transactions.
+Takeaway: the cluster survives a leader kill/restart with no failed client operations; throughput dips ~25% for reads and ~18% for writes compared to steady-state.
 
-* Each key maintains multiple versions, identified by commit timestamps.
-* Transactions read from a consistent snapshot determined at `BEGIN_TRANSACTION`.
-* During execution, reads and writes are recorded in a transaction context but not applied to
-  storage.
-* On `COMMIT`, the leader validates that no newer committed versions exist for any keys in the read
-  set.
-* If validation succeeds, a `COMMIT` entry containing all writes is appended to the Raft log.
-* The transaction becomes visible when Raft replication reaches quorum and the log entry is
-  committed.
+Raw CSV files live in `benchmark/reports/csv`; rerun with `./benchmark/scripts/*` to regenerate.
 
-If validation fails or the client aborts, the transaction is discarded. Because only committed
-transactions are replicated, the system never exposes partial or inconsistent updates.
+## User / Developer Guide
+- **API surface**: begin -> get/put -> commit or abort. Followers forward commits to the current leader; learners reject traffic until caught up. Validation conflicts return an error string (`validation conflict`); clients should retry the transaction.
+- **Client example (Rust)**:
+```rust
+use rivetdb::{ClientConfig, RivetClient};
 
-### Snapshot Reads
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let client = RivetClient::connect(ClientConfig::new("http://127.0.0.1:50051")).await?;
+let txn = client.begin_transaction("demo-client").await?;
+assert!(txn.get("missing").await?.is_none());
+txn.put("item", b"value".to_vec()).await?;
+let receipt = txn.commit().await?;
+println!("commit timestamp: {}", receipt.commit_ts);
+# Ok(())
+# }
+```
+- **Operational notes**:
+  - Storage backends: `--storage memory` (volatile) or `--storage disk` with `--storage-path` (or `--data-dir` fallback) for persistence.
+  - Raft: supply peers via `--peer <id>=<addr>` on each node; nodes start as voters unless the Raft state says otherwise. Nodes expose leader hints internally for forwarding.
+  - Recovery: disk-backed runs replay committed commands from the Raft log; snapshots are stubbed but log replay restores state. Memory backend does not persist across restarts.
 
-Using MVCC, readers never block writers. Each read retrieves the latest committed version less than
-or equal to the transaction’s snapshot timestamp. This ensures repeatable reads and prevents
-anomalies like dirty or non-repeatable reads.
+## Reproducibility Guide
+The instructor will follow these steps verbatim on Ubuntu or macOS.
 
-### Commit Atomicity
+1) **Prerequisites**
+   - Rust toolchain (stable). `protoc` is not required because `protoc-bin-vendored` ships a binary.
+   - Open ports for gRPC (defaults in examples below).
 
-Raft ensures that a commit entry is applied consistently across all replicas. Once a majority
-acknowledges the entry, it is guaranteed to persist. If the leader crashes mid-commit, the new
-leader continues replication from the existing Raft log, ensuring atomicity.
+2) **Build and test**
+```bash
+cargo build --release
+cargo test              # integration tests bind to localhost; allow a few seconds for Raft elections
+```
 
-## Crash Handling
+3) **Run a single node (memory backend)**
+```bash
+cargo run --release -- \
+  --node-id 1 \
+  --listen-addr 127.0.0.1:50051 \
+  --storage memory
+```
 
-RivetDB prioritizes safety over availability during crashes. It ensures that:
+4) **Run a three-node cluster (disk backend)**
+Open three terminals (adjust paths as desired):
+```bash
+# Terminal 1
+cargo run --release -- --node-id 1 --listen-addr 127.0.0.1:6001 \
+  --peer 2=127.0.0.1:6002 --peer 3=127.0.0.1:6003 \
+  --storage disk --storage-path /tmp/rivet/node1 --data-dir /tmp/rivet/raft1
 
-* **Client crash before commit:** No Raft entry is created, so no changes reach the database. The
-  system remains consistent.
-* **Node crash:** The node recovers by replaying its Raft log. Any unapplied but committed entries
-  are applied upon recovery.
-* **Leader crash:** Raft elects a new leader. Because commit decisions are replicated, the new
-  leader continues safely.
+# Terminal 2
+cargo run --release -- --node-id 2 --listen-addr 127.0.0.1:6002 \
+  --peer 1=127.0.0.1:6001 --peer 3=127.0.0.1:6003 \
+  --storage disk --storage-path /tmp/rivet/node2 --data-dir /tmp/rivet/raft2
 
-No special client-side recovery logic is required; the system treats any incomplete transaction as
-aborted. This greatly simplifies failure handling compared to traditional 2PC-based systems.
+# Terminal 3
+cargo run --release -- --node-id 3 --listen-addr 127.0.0.1:6003 \
+  --peer 1=127.0.0.1:6001 --peer 2=127.0.0.1:6002 \
+  --storage disk --storage-path /tmp/rivet/node3 --data-dir /tmp/rivet/raft3
+```
+Then point clients at any node; followers will forward commits to the leader.
 
-## Tentative Schedule
+5) **Run benchmarks**
+```bash
+# Example: full read suite to regenerate CSVs
+pushd benchmark
+./scripts/read_suite.sh
+./scripts/write_suite.sh
+./scripts/thread_scaling_suite.sh
+popd
+```
+Results land in `benchmark/reports/csv`; reruns overwrite existing files.
 
-The project spans **10 weeks**, structured to balance design, implementation, and validation within
-realistic single-person scope.
+## Individual Contributions
+Solo project (Sitao Wang):
+- Designed and implemented MVCC storage layers (in-memory + on-disk), OCC validation, and transaction manager.
+- Built gRPC service and Rust client library with transaction-aware forwarding.
+- Integrated OpenRaft (log store, state machine, recovery, metrics registry) and node bootstrap/CLI.
+- Authored tests for MVCC invariants, client flows, Raft elections/failover, follower forwarding, and recovery.
+- Built the benchmark harness, scripts, and executed the reported experiments.
 
-* **Week 1 (Oct 13 – Oct 19)** — *Design & Setup*
+## Lessons Learned & Conclusion
+- Raft serialization sets an upper bound on write throughput; batching helps but increases validation windows. Parallelism mainly benefits read-heavy workloads.
+- Separating staged writes from committed versions keeps abort logic simple and makes OCC validation explicit.
+- Recovery is practical via Raft log replay even with a lightweight JSON backing; snapshots would further shorten startup time.
+- Remaining gaps: durable snapshot payloads, log compaction tuning, richer client retries on conflicts, and authentication for the gRPC surface.
 
-  Define architecture (MVCC + Raft), choose libraries, and design RPC interfaces.
+## Video Slide Presentation
+TODO - link will be added here.
 
-* **Week 2 (Oct 20 – Oct 26)** — *Core Storage Engine*
+## Video Demo
+TODO - link will be added here.
 
-  Implement in-memory key-value store with version chains per key. Support snapshot reads.
-
-* **Week 3 (Oct 27 – Nov 2)** — *Transaction Manager*
-
-  Implement transaction context, OCC-based validation, and commit logic.
-
-* **Week 4 (Nov 3 – Nov 9)** — *Networking & RPC*
-
-  Add gRPC-based API for transactions and build a simple CLI client.
-
-* **Week 5 (Nov 10 – Nov 16)** — *Raft Integration*
-
-  Integrate an existing Raft library (e.g., [`openraft`]), enabling replication and leader election.
-
-* **Week 6 (Nov 17 – Nov 23)** — *Combine MVCC + Raft*
-
-  Ensure commits are replicated and applied only after Raft consensus.
-
-* **Week 7 (Nov 24 – Nov 30)** — *Crash Recovery*
-
-  Implement log replay, node recovery, and safe transaction cleanup.
-
-* **Week 8 (Dec 1 – Dec 7)** — *Testing & Validation*
-
-  Test concurrency, isolation, and crash recovery scenarios.
-
-* **Week 9 (Dec 8 – Dec 14)** — *Optimization*
-
-  Reduce commit latency, implement caching for read-mostly workloads.
-
-* **Week 10 (Dec 15 – Dec 21)** — *Finalization*
-
-  Complete documentation, prepare demo and final report.
-
-## Expected Outcomes
-
-By the project’s completion, RivetDB will:
-
-* Provide a working prototype demonstrating distributed transactional semantics.
-* Support consistent reads and writes under MVCC.
-* Achieve fault tolerance and crash recovery using Raft replication alone.
-
-[distributed task execution system]: https://github.com/y-scope/spider
-[`openraft`]: https://github.com/databendlabs/openraft
+---
+Proposal content is archived in `docs/proposal.md` for reference.
