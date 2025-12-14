@@ -12,7 +12,7 @@ Operational experience with a distributed task system showed that bolting MariaD
 - Offer both in-memory and file-backed storage engines to exercise MVCC flows and persistence.
 - Deliver reproducible builds, tests, and benchmarks that run on Ubuntu/macOS without manual tooling installs.
 
-## Feature
+## Feature Summary
 - gRPC transactional API with follower forwarding; Rust client library for ergonomic transactions.
 - MVCC storage engine with snapshot reads, OCC validation, staged writes, and abort cleanup.
 - Raft-backed replication, leader election, and commit application; configurable memory/disk backends.
@@ -20,13 +20,26 @@ Operational experience with a distributed task system showed that bolting MariaD
 - Benchmark harness that spins up fresh 3-node clusters per run and records CSV/PNG outputs.
 
 ## Architecture
-- **Data model & API surface**: Key/value store exposed over gRPC (`begin`, `get`, `put`, `commit`, `abort`). Transactions carry a logical snapshot timestamp; reads never mutate state and only record the read set for later validation.
-- **MVCC layout & read path**: Each key has a `VersionChain` sorted by commit timestamp. Reads choose the latest committed version with `commit_ts <= snapshot_ts`, enabling repeatable reads without blocking writers. Staged writes are stored per transaction and are never visible until commit; aborts drop staged intents.
-- **Write staging, validation, commit**: `stage_write` records intents. On commit, the leader validates that no newer committed version exists for any key in the read set (OCC). If valid, it packages an `ApplyTransaction` with a fresh commit timestamp and appends it to Raft. Once committed, staged writes are drained and appended to MVCC chains at that timestamp.
-- **Raft mechanics and use**: Single-leader Raft (OpenRaft) handles elections, log replication, and commit ordering. Client commits enter via `client_write`; followers replicate and apply entries once committed. Followers forward client commits to the leader; commit timestamps advance on the leader to serialize versions. Learners catch up via log replication before serving traffic.
-- **Storage backends**: `InMemoryStorage` for volatile testing and `OnDiskStorage` (JSON) for persistence, selectable via `StorageAdapter`.
-- **Consistency & isolation**: Snapshot isolation via MVCC + OCC; only committed transactions are replicated and applied, so no partial writes leak.
-- **Trade-offs**: OCC keeps reads fast and pushes conflicts to commit time. Single-leader replication simplifies correctness/durability but caps write throughput; batching commits trades latency for throughput up to a point. JSON-backed disk storage favors clarity over write amplification or compaction.
+- **Data model & API surface**  
+  The gRPC layer exposes transactional verbs (`begin`, `get`, `put`, `commit`, `abort`) over a simple key/value model. Each transaction starts with a logical snapshot timestamp that all reads honor. Reads never mutate state; they only record the keys touched so later validation can detect conflicts. This keeps the API small and matches the project goal of demonstrating transactional building blocks without over-specifying schema.
+
+- **MVCC read/write path**  
+  Every key owns a `VersionChain` sorted by commit timestamp. Reads pick the latest committed version with `commit_ts <= snapshot_ts`, guaranteeing repeatable reads and avoiding reader/writer blocking. Writes are staged in per-transaction buffers and never visible until commit; aborts drop staged intents. This layout makes it explicit that uncommitted data cannot leak, and it keeps the read path O(log n) per key regardless of in-flight writers.
+
+- **Write staging, validation, commit**  
+  `stage_write` records intents under a transaction ID. On commit, the leader validates that no newer committed version exists for any key in the read set (optimistic concurrency control). If validation passes, the leader packages an `ApplyTransaction` with a fresh commit timestamp and appends it to Raft. After the log entry is committed, staged writes are drained and appended to MVCC chains at that timestamp. Validation-at-commit minimizes locking and fits the educational goal of showing OCC with MVCC.
+
+- **Raft mechanics and replication**  
+  Raft provides leader election, log replication, and commit ordering. Client commits enter via `client_write`; followers replicate entries and apply them after they are committed. Followers forward client commits to the leader to keep consistency centralized; the leader advances commit timestamps to serialize versions. Learners catch up via log replication before handling traffic, preventing stale nodes from serving requests. This leverages Raft’s strong ordering to avoid a separate 2PC layer.
+
+- **Storage backends**  
+  `InMemoryStorage` offers a fast, volatile path for tests, while `OnDiskStorage` uses JSON files for persistence. Both implement the same `StorageEngine` trait and are selected at runtime via `StorageAdapter`. The disk backend favors clarity and portability over raw throughput; it is sufficient to demonstrate durability and recovery behavior.
+
+- **Consistency & isolation**  
+  Snapshot isolation is enforced by combining MVCC snapshot reads with OCC validation. Only committed transactions are replicated and applied, so partial writes never leak. Followers serve reads against their local MVCC state using the transaction’s snapshot timestamp, while forwarding commits to the leader ensures a single serialization point.
+
+- **Design trade-offs**  
+  OCC keeps reads cheap and defers conflict resolution to commit time, which benefits read-heavy workloads. Single-leader Raft simplifies correctness and durability but caps write throughput; batching commits improves throughput until larger log entries and longer validation windows add latency. The JSON-backed disk format is intentionally simple to keep the prototype approachable, at the cost of write amplification and compaction sophistication.
 
 ```mermaid
 sequenceDiagram
