@@ -266,9 +266,17 @@ async fn execute_transaction(
     failures: &Arc<AtomicUsize>,
 ) -> Result<()> {
     let mut attempts = 0;
+    let mut last_redirect_endpoint: Option<String> = None;
+    const MAX_ATTEMPTS: usize = 500;
     loop {
         attempts += 1;
-        let endpoint = preferred_endpoint(cluster).await?;
+        if attempts > MAX_ATTEMPTS {
+            failures.fetch_add(1, Ordering::SeqCst);
+            return Err(anyhow!(
+                "transaction exceeded max attempts ({MAX_ATTEMPTS}), last seen redirect/failure"
+            ));
+        }
+        let endpoint = preferred_endpoint(cluster, last_redirect_endpoint.as_deref()).await?;
         let client = RivetClient::connect(ClientConfig::new(endpoint.clone())).await;
         let client = match client {
             Ok(client) => client,
@@ -290,6 +298,7 @@ async fn execute_transaction(
             Err(err) => {
                 if is_redirectable(&err) {
                     redirects.fetch_add(1, Ordering::SeqCst);
+                    last_redirect_endpoint = Some(endpoint);
                     sleep(Duration::from_millis(50)).await;
                     continue;
                 }
@@ -299,11 +308,6 @@ async fn execute_transaction(
                         attempt = attempts,
                         "retrying transaction after error: {err}"
                     );
-                }
-
-                if attempts >= 50 {
-                    failures.fetch_add(1, Ordering::SeqCst);
-                    return Err(err).context("execute transaction");
                 }
 
                 sleep(Duration::from_millis(100)).await;
@@ -350,17 +354,31 @@ fn is_redirectable(err: &ClientError) -> bool {
     }
 }
 
-async fn preferred_endpoint(cluster: &Arc<Mutex<BenchmarkCluster>>) -> Result<String> {
+async fn preferred_endpoint(
+    cluster: &Arc<Mutex<BenchmarkCluster>>,
+    exclude: Option<&str>,
+) -> Result<String> {
     const ATTEMPTS: usize = 50;
     const DELAY_MS: u64 = 100;
 
     for _ in 0..ATTEMPTS {
         let endpoint = {
             let cluster = cluster.lock().await;
-            cluster
-                .leader_endpoint()
-                .await
-                .or_else(|| cluster.any_endpoint())
+            if let Some(leader) = cluster.leader_endpoint().await {
+                Some(leader)
+            } else {
+                let endpoints = cluster.endpoints();
+                if endpoints.is_empty() {
+                    None
+                } else if let Some(ex) = exclude {
+                    endpoints
+                        .into_iter()
+                        .find(|ep| ep != ex)
+                        .or_else(|| cluster.any_endpoint())
+                } else {
+                    cluster.any_endpoint()
+                }
+            }
         };
         if let Some(endpoint) = endpoint {
             return Ok(endpoint);

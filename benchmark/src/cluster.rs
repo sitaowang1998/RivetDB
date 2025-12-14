@@ -118,6 +118,14 @@ impl BenchmarkCluster {
             .map(|srv| srv.http_endpoint())
     }
 
+    pub fn endpoints(&self) -> Vec<String> {
+        self.servers
+            .iter()
+            .filter(|srv| srv.is_running())
+            .map(|srv| srv.http_endpoint())
+            .collect()
+    }
+
     pub async fn kill_node(&mut self, node_id: u64) -> Result<()> {
         if let Some(server) = self.servers.iter_mut().find(|srv| srv.node_id == node_id) {
             server.stop().await?;
@@ -239,10 +247,11 @@ impl NodeServer {
         let listener = TcpListener::bind(self.addr)
             .await
             .with_context(|| format!("bind listener for restart on {}", self.addr))?;
-        if self.data_dir.is_none() {
+        // For temp dirs we recreate; for persistent paths we keep data for recovery.
+        if self.data_dir.is_some() {
             fs::remove_dir_all(&self.storage_root).ok();
-            fs::create_dir_all(&self.storage_root)?;
         }
+        fs::create_dir_all(&self.storage_root)?;
         self.storage = Arc::new(OnDiskStorage::open(&self.storage_root)?);
         let (node, shutdown_tx, handle) =
             Self::launch(self.config.clone(), self.storage.clone(), listener).await?;
