@@ -12,72 +12,67 @@ Operational experience with a distributed task system showed that bolting MariaD
 - Offer both in-memory and file-backed storage engines to exercise MVCC flows and persistence.
 - Deliver reproducible builds, tests, and benchmarks that run on Ubuntu/macOS without manual tooling installs.
 
-## Features
-- **gRPC transactional API** (`proto/rivetdb.proto`, `src/rpc/server.rs`): begin/get/put/commit/abort plus follower-to-leader forwarding when clients talk to a follower.
-- **MVCC storage engines** (`src/storage`): version chains per key with snapshot reads, OCC validation, staged writes, commit application, and abort cleanup. Both `InMemoryStorage` and JSON-backed `OnDiskStorage` are selectable at runtime via `StorageAdapter`.
-- **Transaction manager** (`src/transaction.rs`): tracks snapshots, read sets, staged writes, validation, and commit timestamp allocation.
-- **Raft replication** (`src/raft`): OpenRaft-backed log store, state machine that replays `ApplyTransaction` commands into the storage engine, membership tracking, leader election, snapshot scaffolding, and in-memory transport for tests.
-- **Node runtime and CLI** (`src/main.rs`, `src/config.rs`): start a node with `--node-id`, `--listen-addr`, `--peer` definitions, and `--storage` backend selection. Exposes leader endpoint hints for clients.
-- **Rust client library** (`src/client.rs`, `docs/client.md`): ergonomic async wrapper over the gRPC service with typed errors and transaction helpers.
-- **Resilience and recovery**: disk-backed runs persist Raft state and MVCC versions; restart tests verify recovery (see `tests/recovery.rs`). Followers forward commits to the leader and block serving when in learner state.
-- **Test coverage**: unit and integration suites exercise MVCC invariants, transaction conflicts, Raft leader election/failover, follower commit forwarding, client abort semantics, and restart recovery.
-- **Benchmark harness** (`benchmark/`): spins up fresh 3-node clusters per run, seeds data, and records CSV results for multiple workloads; scripts trim to the middle five of seven runs.
+## Feature
+- gRPC transactional API with follower forwarding; Rust client library for ergonomic transactions.
+- MVCC storage engine with snapshot reads, OCC validation, staged writes, and abort cleanup.
+- Raft-backed replication, leader election, and commit application; configurable memory/disk backends.
+- CLI/runtime to launch nodes with peer topology; integration tests for MVCC, Raft failover, client flows, and recovery.
+- Benchmark harness that spins up fresh 3-node clusters per run and records CSV/PNG outputs.
+
+## Architecture
+- **Data model & API surface**: Key/value store exposed over gRPC (`begin`, `get`, `put`, `commit`, `abort`). Transactions carry a logical snapshot timestamp; reads never mutate state and only record the read set for later validation.
+- **MVCC layout & read path**: Each key has a `VersionChain` sorted by commit timestamp. Reads choose the latest committed version with `commit_ts <= snapshot_ts`, enabling repeatable reads without blocking writers. Staged writes are stored per transaction and are never visible until commit; aborts drop staged intents.
+- **Write staging, validation, commit**: `stage_write` records intents. On commit, the leader validates that no newer committed version exists for any key in the read set (OCC). If valid, it packages an `ApplyTransaction` with a fresh commit timestamp and appends it to Raft. Once committed, staged writes are drained and appended to MVCC chains at that timestamp.
+- **Raft mechanics and use**: Single-leader Raft (OpenRaft) handles elections, log replication, and commit ordering. Client commits enter via `client_write`; followers replicate and apply entries once committed. Followers forward client commits to the leader; commit timestamps advance on the leader to serialize versions. Learners catch up via log replication before serving traffic.
+- **Storage backends**: `InMemoryStorage` for volatile testing and `OnDiskStorage` (JSON) for persistence, selectable via `StorageAdapter`.
+- **Consistency & isolation**: Snapshot isolation via MVCC + OCC; only committed transactions are replicated and applied, so no partial writes leak.
+- **Trade-offs**: OCC keeps reads fast and pushes conflicts to commit time. Single-leader replication simplifies correctness/durability but caps write throughput; batching commits trades latency for throughput up to a point. JSON-backed disk storage favors clarity over write amplification or compaction.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Follower
+    participant Leader
+    participant RaftLog as Raft Log
+    participant Storage
+
+    Client->>Follower: begin/get/put/commit
+    Follower->>Leader: forward commit (ship txn)
+    Leader->>RaftLog: append ApplyTransaction
+    RaftLog-->>Follower: replicate entry
+    RaftLog-->>Leader: commit entry
+    Leader->>Storage: apply writes at commit_ts
+    Follower->>Storage: apply writes after commit
+```
+
+### Recovery & catch-up
+- Disk-backed nodes recover by replaying committed Raft entries into storage. Snapshot plumbing exists but payloads are stubbed, so log replay restores state. Memory backend is non-persistent.
+- Learners (and followers while catching up) reject client traffic until they have applied the latest log; once caught up they serve reads and forward commits to the leader.
+
 
 ## Performance Benchmarks
 - **Environment**: Ubuntu 22.04 on dual-socket Intel Xeon E5-2630 v3 (2.40GHz, 32 vCPUs), SSD-backed storage.
-- **Methodology**: Each benchmark script (see `benchmark/README.md`) spins up a fresh 3-node Raft cluster, runs the workload, tears it down, and repeats for 7 iterations. Results below use the trimmed mean (middle 5) of `duration_ms` converted to ops/s (1000 ops per run), with disk-backed storage in temp dirs by default.
-- **Graphs**: Mermaid lacks a native line chart; recommended charts are line plots of throughput (ops/s) vs commit interval/read ratio/thread count using the tables below. If you prefer, I can render Mermaid flow-based visuals, but the data here is ready for a plotting tool.
+- **Methodology**: For all experiments, a fresh 3-node Raft cluster uses disk-backed storage in temp dirs with 5 client threads. Each workload runs 1000 operations for 7 iterations; charts show the trimmed mean (middle 5). Read-heavy runs seed deterministic keys so reads hit existing data.
 
 ### Commit frequency impact
+Setup delta: only the commit interval changes for read-only and write-only workloads.
 ![Commit frequency impact](benchmark/reports/graphs/commit_frequency.png)
-| Workload | Commit interval (ops) | Throughput (ops/s) | Trimmed duration (ms) |
-| --- | --- | --- | --- |
-| Read-only | 10 | 6418.5 | 155.8 |
-| Read-only | 25 | 3255.2 | 307.2 |
-| Read-only | 50 | 1794.0 | 557.4 |
-| Read-only | 75 | 1357.6 | 736.6 |
-| Read-only | 100 | 992.5 | 1007.6 |
-| Write-only | 10 | 3819.7 | 261.8 |
-| Write-only | 25 | 1531.4 | 653.0 |
-| Write-only | 50 | 926.8 | 1079.0 |
-| Write-only | 75 | 696.8 | 1435.2 |
-| Write-only | 100 | 524.5 | 1906.6 |
-
 Takeaway: frequent commits still help throughput, especially for writes (3.8k ops/s at 10-op commits down to ~525 ops/s at 100-op commits); batching beyond ~50 ops/commit degrades throughput as Raft entries grow and validation windows widen.
 
 ### Read/write mix (100 commits, 1000 ops)
+Setup delta: read ratio swept from 0% to 100% while holding 100 commits per 1000 ops.
 ![Read/write mix](benchmark/reports/graphs/read_write_ratio.png)
-| Read ratio (%) | Throughput (ops/s) | Trimmed duration (ms) |
-| --- | --- | --- |
-| 0 | 448.9 | 2227.6 |
-| 10 | 412.6 | 2423.4 |
-| 20 | 487.5 | 2051.4 |
-| 30 | 547.3 | 1827.2 |
-| 40 | 538.0 | 1858.6 |
-| 50 | 548.8 | 1822.2 |
-| 60 | 570.9 | 1751.6 |
-| 70 | 601.3 | 1663.0 |
-| 80 | 673.9 | 1483.8 |
-| 90 | 819.7 | 1220.0 |
-| 100 | 1016.9 | 983.4 |
-
 Takeaway: throughput rises steadily as the workload skews toward reads (roughly 2.3x from 0% to 100% reads); snapshot reads stay cheap while writes pay OCC validation and Raft replication costs.
 
 ### Thread scaling (100 commits, 1000 ops)
+Setup delta: client threads swept from 1 to 5 at fixed 100 commits/1000 ops.
 ![Thread scaling](benchmark/reports/graphs/scalability.png)
-| Threads | Read throughput (ops/s) | Write throughput (ops/s) | 50/50 mixed throughput (ops/s) |
-| --- | --- | --- | --- |
-| 1 | 504.0 | 306.1 | 323.2 |
-| 2 | 748.3 | 402.1 | 424.8 |
-| 3 | 861.9 | 437.9 | 485.9 |
-| 4 | 923.2 | 505.8 | 523.5 |
-| 5 | 982.9 | 510.1 | 555.7 |
-
 Takeaway: scaling is near-linear up to ~4 threads; saturation appears by 5 threads (reads ~0.98k ops/s), consistent with a single-leader commit bottleneck.
 
 ### Kill/restart resilience (leader killed mid-run)
+Setup delta: leader is killed once mid-run and restarted; compared against a no-failure baseline (1000 ops, 100 commits).
 | Workload | Scenario | Throughput (ops/s) | Trimmed duration (ms) |
-| --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- |
 | 100% reads, 100 commits | Baseline (no failure) | 992.5 | 1007.6 |
 | 100% reads, 100 commits | Leader kill/restart | 746.2 | 1340.2 |
 | 100% writes, 100 commits | Baseline (no failure) | 524.5 | 1906.6 |
@@ -104,34 +99,14 @@ println!("commit timestamp: {}", receipt.commit_ts);
 # Ok(())
 # }
 ```
-- **Operational notes**:
-  - Storage backends: `--storage memory` (volatile) or `--storage disk` with `--storage-path` (or `--data-dir` fallback) for persistence.
-  - Raft: supply peers via `--peer <id>=<addr>` on each node; nodes start as voters unless the Raft state says otherwise. Nodes expose leader hints internally for forwarding.
-  - Recovery: disk-backed runs replay committed commands from the Raft log; snapshots are stubbed but log replay restores state. Memory backend does not persist across restarts.
-
-## Reproducibility Guide
-The instructor will follow these steps verbatim on Ubuntu or macOS.
-
-1) **Prerequisites**
-   - Rust toolchain (stable). `protoc` is not required because `protoc-bin-vendored` ships a binary.
-   - Open ports for gRPC (defaults in examples below).
-
-2) **Build and test**
-```bash
-cargo build --release
-cargo test              # integration tests bind to localhost; allow a few seconds for Raft elections
-```
-
-3) **Run a single node (memory backend)**
+- **Run a single node (memory backend)**:
 ```bash
 cargo run --release -- \
   --node-id 1 \
   --listen-addr 127.0.0.1:50051 \
   --storage memory
 ```
-
-4) **Run a three-node cluster (disk backend)**
-Open three terminals (adjust paths as desired):
+- **Run a three-node cluster (disk backend)**: open three terminals (adjust paths):
 ```bash
 # Terminal 1
 cargo run --release -- --node-id 1 --listen-addr 127.0.0.1:6001 \
@@ -148,18 +123,25 @@ cargo run --release -- --node-id 3 --listen-addr 127.0.0.1:6003 \
   --peer 1=127.0.0.1:6001 --peer 2=127.0.0.1:6002 \
   --storage disk --storage-path /tmp/rivet/node3 --data-dir /tmp/rivet/raft3
 ```
-Then point clients at any node; followers will forward commits to the leader.
+Point clients at any leader or follower; followers forward commits to the leader. Learners reject traffic until caught up.
+- **Operational notes**:
+  - Storage backends: `--storage memory` (volatile) or `--storage disk` with `--storage-path` (or `--data-dir` fallback) for persistence.
+  - Raft: define peers via `--peer <id>=<addr>`; nodes start as voters unless Raft state says otherwise.
+  - Recovery: disk-backed runs replay committed commands from the Raft log; snapshot plumbing exists but payloads are stubbed (state is recovered via log replay). Memory backend does not persist across restarts.
 
-5) **Run benchmarks**
+## Reproducibility Guide
+- **Prerequisites**: Rust toolchain (stable); no system `protoc` needed.
+- **Build and test**:
 ```bash
-# Example: full read suite to regenerate CSVs
-pushd benchmark
-./scripts/read_suite.sh
-./scripts/write_suite.sh
-./scripts/thread_scaling_suite.sh
-popd
+cargo build --release
+cargo test              # integration tests bind to localhost; allow a few seconds for Raft elections
 ```
-Results land in `benchmark/reports/csv`; reruns overwrite existing files.
+- **Benchmarks**: The scripts in `benchmark/scripts` spin up their own 3-node clusters, run workloads for 7 iterations, and write CSVs/PNGs under `benchmark/reports`. No manual servers are needed for benchmarks.
+  - `./benchmark/scripts/read_suite.sh` — read-only commit-interval sweep.
+  - `./benchmark/scripts/write_suite.sh` — write-only commit-interval sweep.
+  - `./benchmark/scripts/thread_scaling_suite.sh` — thread count sweep for reads/writes/mixed.
+  - `./benchmark/scripts/mixed_1000_ops_10_commits.sh` — read ratio sweep at fixed commits.
+  - `./benchmark/scripts/kill_restart_reads.sh` / `kill_restart_writes.sh` — leader kill/restart mid-run.
 
 ## Individual Contributions
 Solo project (Sitao Wang):
