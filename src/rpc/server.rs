@@ -30,6 +30,8 @@ pub struct RivetKvService<S: StorageEngine> {
 
 impl<S: StorageEngine + 'static> RivetKvService<S> {
     const INVALID_TXN_ID_MESSAGE: &'static str = "invalid transaction id";
+    const NOT_SERVING_MESSAGE: &'static str =
+        "node is catching up; please retry against another node";
 
     pub fn new(node: Arc<RivetNode<S>>) -> Self {
         Self {
@@ -44,6 +46,14 @@ impl<S: StorageEngine + 'static> RivetKvService<S> {
 
     fn parse_txn_id(raw: &str) -> Result<TxnId, ()> {
         raw.parse::<TxnId>().map_err(|_| ())
+    }
+
+    fn not_serving_message(&self) -> Option<String> {
+        if self.node.role() == NodeRole::Learner {
+            Some(Self::NOT_SERVING_MESSAGE.to_string())
+        } else {
+            None
+        }
     }
 
     async fn store_txn(&self, txn: TransactionContext) {
@@ -162,6 +172,10 @@ where
         &self,
         request: tonic::Request<BeginTransactionRequest>,
     ) -> Result<Response<BeginTransactionResponse>, Status> {
+        if let Some(message) = self.not_serving_message() {
+            return Err(Status::unavailable(message));
+        }
+
         let _client_id = request.into_inner().client_id;
         let txn = self.manager().begin_transaction();
         let snapshot_ts = txn.snapshot_ts();
@@ -178,6 +192,12 @@ where
         &self,
         request: tonic::Request<GetRequest>,
     ) -> Result<Response<GetResponse>, Status> {
+        if let Some(message) = self.not_serving_message() {
+            return Ok(Response::new(GetResponse {
+                outcome: Some(get_response::Outcome::ErrorMessage(message)),
+            }));
+        }
+
         let req = request.into_inner();
         let txn_id = Self::parse_txn_id(&req.txn_id).map_err(|_| Self::invalid_txn_status())?;
         let mut txn = match self.take_txn(&txn_id).await {
@@ -221,6 +241,12 @@ where
         &self,
         request: tonic::Request<PutRequest>,
     ) -> Result<Response<PutResponse>, Status> {
+        if let Some(message) = self.not_serving_message() {
+            return Ok(Response::new(PutResponse {
+                outcome: Some(put_response::Outcome::ErrorMessage(message)),
+            }));
+        }
+
         let req = request.into_inner();
         let txn_id = Self::parse_txn_id(&req.txn_id).map_err(|_| Self::invalid_txn_status())?;
         let txn = match self.take_txn(&txn_id).await {
@@ -260,6 +286,12 @@ where
         &self,
         request: tonic::Request<CommitRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
+        if let Some(message) = self.not_serving_message() {
+            return Ok(Response::new(CommitResponse {
+                outcome: Some(commit_response::Outcome::ErrorMessage(message)),
+            }));
+        }
+
         let req = request.into_inner();
         let txn_id = Self::parse_txn_id(&req.txn_id).map_err(|_| Self::invalid_txn_status())?;
         let txn = match self.take_txn(&txn_id).await {
@@ -313,6 +345,12 @@ where
         &self,
         request: tonic::Request<AbortRequest>,
     ) -> Result<Response<AbortResponse>, Status> {
+        if let Some(message) = self.not_serving_message() {
+            return Ok(Response::new(AbortResponse {
+                outcome: Some(abort_response::Outcome::ErrorMessage(message)),
+            }));
+        }
+
         let req = request.into_inner();
         let txn_id = Self::parse_txn_id(&req.txn_id).map_err(|_| Self::invalid_txn_status())?;
 
@@ -335,6 +373,12 @@ where
         &self,
         request: tonic::Request<ShipTransactionRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
+        if let Some(message) = self.not_serving_message() {
+            return Ok(Response::new(CommitResponse {
+                outcome: Some(commit_response::Outcome::ErrorMessage(message)),
+            }));
+        }
+
         let req = request.into_inner();
         let txn_id = Self::parse_txn_id(&req.txn_id).map_err(|_| Self::invalid_txn_status())?;
 

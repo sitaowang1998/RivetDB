@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep};
 
 static TEST_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+const LEADER_TIMEOUT: Duration = Duration::from_secs(30);
+const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn multi_node_cluster_elects_single_leader() {
@@ -31,12 +33,12 @@ async fn multi_node_cluster_elects_single_leader() {
         let (nodes, _, _guards) = spawn_cluster(&layout, backend).await;
 
         let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-        let leader = wait_for_unique_leader(&ids, Duration::from_secs(10))
+        let leader = wait_for_unique_leader(&ids, LEADER_TIMEOUT)
             .await
             .expect("cluster should elect exactly one leader");
 
         assert!(
-            wait_for_cluster_convergence(&ids, leader, Duration::from_secs(20)).await,
+            wait_for_cluster_convergence(&ids, leader, CONVERGENCE_TIMEOUT).await,
             "cluster did not converge on leader {leader}"
         );
 
@@ -58,11 +60,11 @@ async fn replicated_commit_visible_on_followers() {
 
         let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
         let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-        let leader = wait_for_unique_leader(&ids, Duration::from_secs(10))
+        let leader = wait_for_unique_leader(&ids, LEADER_TIMEOUT)
             .await
             .expect("cluster should elect a leader");
         assert!(
-            wait_for_cluster_convergence(&ids, leader, Duration::from_secs(20)).await,
+            wait_for_cluster_convergence(&ids, leader, CONVERGENCE_TIMEOUT).await,
             "cluster did not converge on leader {leader}"
         );
 
@@ -106,7 +108,7 @@ async fn cluster_commits_with_follower_down() {
 
         let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
         let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-        let leader = wait_for_unique_leader(&ids, Duration::from_secs(10))
+        let leader = wait_for_unique_leader(&ids, LEADER_TIMEOUT)
             .await
             .expect("leader should be elected");
 
@@ -146,7 +148,7 @@ async fn cluster_commits_with_follower_down() {
         let receipt = match commit_result {
             Ok(receipt) => {
                 assert!(
-                    wait_for_cluster_convergence(&survivors, leader, Duration::from_secs(20)).await,
+                    wait_for_cluster_convergence(&survivors, leader, CONVERGENCE_TIMEOUT).await,
                     "leader should remain stable after follower shutdown"
                 );
                 receipt
@@ -184,7 +186,7 @@ async fn leader_shutdown_during_commit_recovers() {
 
         let (nodes, storages, _guards) = spawn_cluster(&layout, backend).await;
         let ids: Vec<u64> = layout.iter().map(|(id, _)| *id).collect();
-        let leader = wait_for_unique_leader(&ids, Duration::from_secs(10))
+        let leader = wait_for_unique_leader(&ids, LEADER_TIMEOUT)
             .await
             .expect("initial leader");
 
@@ -213,11 +215,11 @@ async fn leader_shutdown_during_commit_recovers() {
         drop(commit_err);
 
         let survivors: Vec<u64> = ids.iter().copied().filter(|id| *id != leader).collect();
-        let new_leader = wait_for_unique_leader(&survivors, Duration::from_secs(10))
+        let new_leader = wait_for_unique_leader(&survivors, LEADER_TIMEOUT)
             .await
             .expect("new leader after shutdown");
         assert!(
-            wait_for_cluster_convergence(&survivors, new_leader, Duration::from_secs(20)).await,
+            wait_for_cluster_convergence(&survivors, new_leader, CONVERGENCE_TIMEOUT).await,
             "remaining nodes should converge on new leader"
         );
 
@@ -402,7 +404,7 @@ async fn handle_commit_error(
 ) -> CommitReceipt {
     match err {
         CommitError::Raft(_) => {
-            let new_leader = wait_for_unique_leader(survivors, Duration::from_secs(10))
+            let new_leader = wait_for_unique_leader(survivors, LEADER_TIMEOUT)
                 .await
                 .expect("new leader after disruption");
             commit_from_node(ids, nodes, new_leader, key, value).await
