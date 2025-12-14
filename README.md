@@ -20,26 +20,24 @@ Operational experience with a distributed task system showed that bolting MariaD
 - Benchmark harness that spins up fresh 3-node clusters per run and records CSV/PNG outputs.
 
 ## Architecture
-- **Data model & API surface**  
-  The gRPC layer exposes transactional verbs (`begin`, `get`, `put`, `commit`, `abort`) over a simple key/value model. Each transaction starts with a logical snapshot timestamp that all reads honor. Reads never mutate state; they only record the keys touched so later validation can detect conflicts. This keeps the API small and matches the project goal of demonstrating transactional building blocks without over-specifying schema.
+### Concurrency model: MVCC plus optimistic validation
+We pick optimistic concurrency control (OCC) on top of MVCC to keep the hot path simple and read-friendly. Each transaction grabs a logical snapshot timestamp on `begin`. Reads never mutate state—they return the newest version whose `commit_ts <= snapshot_ts` and record the key in a read set. At commit, the leader checks whether any key in that read set has been updated since the snapshot; if so, the commit fails with `validation conflict` and the client retries. This avoids per-key locks, makes conflicts explicit, and clearly demonstrates snapshot isolation.
 
-- **MVCC read/write path**  
-  Every key owns a `VersionChain` sorted by commit timestamp. Reads pick the latest committed version with `commit_ts <= snapshot_ts`, guaranteeing repeatable reads and avoiding reader/writer blocking. Writes are staged in per-transaction buffers and never visible until commit; aborts drop staged intents. This layout makes it explicit that uncommitted data cannot leak, and it keeps the read path O(log n) per key regardless of in-flight writers.
+### Versioning mechanics and write visibility
+Every key owns a `VersionChain` sorted by commit timestamp. Writes are staged per transaction in a side buffer and are never visible until commit. Aborts drop staged intents. When a transaction commits, those staged writes are appended atomically to the version chains with the assigned commit timestamp. This ensures uncommitted data never leaks and keeps the read path predictable (timestamp partitioning on a small ordered list).
 
-- **Write staging, validation, commit**  
-  `stage_write` records intents under a transaction ID. On commit, the leader validates that no newer committed version exists for any key in the read set (optimistic concurrency control). If validation passes, the leader packages an `ApplyTransaction` with a fresh commit timestamp and appends it to Raft. After the log entry is committed, staged writes are drained and appended to MVCC chains at that timestamp. Validation-at-commit minimizes locking and fits the educational goal of showing OCC with MVCC.
+### Commit ordering and Raft
+Raft gives a single, strongly ordered commit stream instead of layering a separate 2PC. After validation, the leader assigns a fresh commit timestamp (monotonic counter) and appends an `ApplyTransaction` payload via `client_write`. Followers replicate entries and apply them after the log commits. Followers forward client commits to the leader to keep a single serialization point. Learners replicate until caught up and reject traffic while behind, preventing stale reads/writes.
 
-- **Raft mechanics and replication**  
-  Raft provides leader election, log replication, and commit ordering. Client commits enter via `client_write`; followers replicate entries and apply them after they are committed. Followers forward client commits to the leader to keep consistency centralized; the leader advances commit timestamps to serialize versions. Learners catch up via log replication before handling traffic, preventing stale nodes from serving requests. This leverages Raft’s strong ordering to avoid a separate 2PC layer.
+### Storage layer
+Two interchangeable backends implement the `StorageEngine` contract: `InMemoryStorage` for fast, volatile runs and `OnDiskStorage` (JSON) for persistence, selected via `StorageAdapter`. Both manage staged writes and version chains identically. The on-disk format favors clarity and portability over write amplification/compaction optimizations, which is acceptable for a teaching-oriented prototype.
 
-- **Storage backends**  
-  `InMemoryStorage` offers a fast, volatile path for tests, while `OnDiskStorage` uses JSON files for persistence. Both implement the same `StorageEngine` trait and are selected at runtime via `StorageAdapter`. The disk backend favors clarity and portability over raw throughput; it is sufficient to demonstrate durability and recovery behavior.
-
-- **Consistency & isolation**  
-  Snapshot isolation is enforced by combining MVCC snapshot reads with OCC validation. Only committed transactions are replicated and applied, so partial writes never leak. Followers serve reads against their local MVCC state using the transaction’s snapshot timestamp, while forwarding commits to the leader ensures a single serialization point.
-
-- **Design trade-offs**  
-  OCC keeps reads cheap and defers conflict resolution to commit time, which benefits read-heavy workloads. Single-leader Raft simplifies correctness and durability but caps write throughput; batching commits improves throughput until larger log entries and longer validation windows add latency. The JSON-backed disk format is intentionally simple to keep the prototype approachable, at the cost of write amplification and compaction sophistication.
+### End-to-end flow
+- Begin: client receives a transaction ID and snapshot timestamp from any node.
+- Read: return latest committed version ≤ snapshot_ts; record the key in the transaction’s read set.
+- Write: stage the intent under the txn ID; it remains invisible.
+- Commit: leader validates the read set, appends `ApplyTransaction` with a new commit_ts to Raft, and after commit drains staged writes into version chains on all nodes.
+- Abort: discard staged intents.
 
 ```mermaid
 sequenceDiagram
@@ -59,8 +57,13 @@ sequenceDiagram
 ```
 
 ### Recovery & catch-up
-- Disk-backed nodes recover by replaying committed Raft entries into storage. Snapshot plumbing exists but payloads are stubbed, so log replay restores state. Memory backend is non-persistent.
+- Disk-backed nodes rebuild state by replaying committed Raft log entries into storage. Snapshot plumbing exists but payloads are stubbed, so log replay is the recovery path. Memory backend is non-persistent.
 - Learners (and followers while catching up) reject client traffic until they have applied the latest log; once caught up they serve reads and forward commits to the leader.
+
+### Design trade-offs
+- OCC keeps reads fast and defers conflicts to commit time; good for read-heavy workloads, retry-prone under high write contention.
+- Single-leader Raft simplifies correctness/durability but caps write throughput; batching commits boosts throughput until larger entries and longer validation windows add latency.
+- Simple JSON persistence keeps the prototype approachable at the cost of write amplification and missing compaction—sufficient for demonstrating durability and recovery, not tuned for production.
 
 
 ## Performance Benchmarks
