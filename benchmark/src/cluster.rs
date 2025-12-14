@@ -111,12 +111,11 @@ impl BenchmarkCluster {
         }
     }
 
-    pub fn endpoints(&self) -> Vec<String> {
+    pub fn any_endpoint(&self) -> Option<String> {
         self.servers
             .iter()
-            .filter(|srv| srv.is_running())
+            .find(|srv| srv.is_running())
             .map(|srv| srv.http_endpoint())
-            .collect()
     }
 
     pub async fn kill_node(&mut self, node_id: u64) -> Result<()> {

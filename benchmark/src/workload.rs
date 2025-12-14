@@ -52,6 +52,8 @@ pub struct RunMeasurement {
     pub writes: usize,
     pub commits: usize,
     pub commit_every: usize,
+    pub redirects: usize,
+    pub failures: usize,
 }
 
 pub async fn run_workload(
@@ -99,10 +101,6 @@ async fn run_workload_inner(
             .context("leader election before workload")?;
     }
 
-    if plan.requires_seed {
-        seed_sample_data(&cluster).await?;
-    }
-
     let generator = Arc::new(Mutex::new(OperationGenerator::new(
         plan.read_ops,
         plan.write_ops,
@@ -113,8 +111,14 @@ async fn run_workload_inner(
     let read_count = Arc::new(AtomicUsize::new(0));
     let write_count = Arc::new(AtomicUsize::new(0));
     let commit_count = Arc::new(AtomicUsize::new(0));
+    let redirect_count = Arc::new(AtomicUsize::new(0));
+    let failure_count = Arc::new(AtomicUsize::new(0));
     let kill_triggered = Arc::new(AtomicBool::new(false));
     let kill_lock = Arc::new(Mutex::new(()));
+
+    if plan.requires_seed {
+        seed_sample_data(&cluster, &redirect_count, &failure_count).await?;
+    }
 
     let start = Instant::now();
 
@@ -128,6 +132,8 @@ async fn run_workload_inner(
         let read_count = read_count.clone();
         let write_count = write_count.clone();
         let commit_count = commit_count.clone();
+        let redirect_count = redirect_count.clone();
+        let failure_count = failure_count.clone();
         let kill_plan = plan.kill.clone();
         let kill_triggered = kill_triggered.clone();
         let kill_lock = kill_lock.clone();
@@ -166,7 +172,7 @@ async fn run_workload_inner(
                     .count();
                 let batch_writes = batch.len() - batch_reads;
 
-                execute_transaction(&cluster, &batch).await?;
+                execute_transaction(&cluster, &batch, &redirect_count, &failure_count).await?;
                 read_count.fetch_add(batch_reads, Ordering::SeqCst);
                 write_count.fetch_add(batch_writes, Ordering::SeqCst);
                 commit_count.fetch_add(1, Ordering::SeqCst);
@@ -203,10 +209,16 @@ async fn run_workload_inner(
         writes: write_count.load(Ordering::SeqCst),
         commits: commit_count.load(Ordering::SeqCst),
         commit_every,
+        redirects: redirect_count.load(Ordering::SeqCst),
+        failures: failure_count.load(Ordering::SeqCst),
     })
 }
 
-async fn seed_sample_data(cluster: &Arc<Mutex<BenchmarkCluster>>) -> Result<()> {
+async fn seed_sample_data(
+    cluster: &Arc<Mutex<BenchmarkCluster>>,
+    redirects: &Arc<AtomicUsize>,
+    failures: &Arc<AtomicUsize>,
+) -> Result<()> {
     let mut remaining = SEED_KEY_COUNT;
     let mut cursor = 0;
 
@@ -220,7 +232,7 @@ async fn seed_sample_data(cluster: &Arc<Mutex<BenchmarkCluster>>) -> Result<()> 
             })
             .collect::<Vec<_>>();
 
-        execute_transaction(cluster, &operations).await?;
+        execute_transaction(cluster, &operations, redirects, failures).await?;
         remaining -= batch;
     }
 
@@ -250,6 +262,8 @@ async fn kill_node(cluster: &Arc<Mutex<BenchmarkCluster>>, plan: &KillPlan) -> R
 async fn execute_transaction(
     cluster: &Arc<Mutex<BenchmarkCluster>>,
     ops: &[Operation],
+    redirects: &Arc<AtomicUsize>,
+    failures: &Arc<AtomicUsize>,
 ) -> Result<()> {
     let mut attempts = 0;
     loop {
@@ -259,14 +273,13 @@ async fn execute_transaction(
         let client = match client {
             Ok(client) => client,
             Err(err) => {
-                if attempts >= 5 {
-                    return Err(err).context("connect for transaction");
+                if attempts % 5 == 0 {
+                    warn!(
+                        endpoint = endpoint,
+                        attempt = attempts,
+                        "connect failed: {err}"
+                    );
                 }
-                warn!(
-                    endpoint = endpoint,
-                    attempt = attempts,
-                    "connect failed, retrying"
-                );
                 sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -275,13 +288,24 @@ async fn execute_transaction(
         match run_txn(&client, ops).await {
             Ok(()) => return Ok(()),
             Err(err) => {
-                if attempts >= 5 {
+                if is_redirectable(&err) {
+                    redirects.fetch_add(1, Ordering::SeqCst);
+                    sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+
+                if attempts % 5 == 0 {
+                    warn!(
+                        attempt = attempts,
+                        "retrying transaction after error: {err}"
+                    );
+                }
+
+                if attempts >= 50 {
+                    failures.fetch_add(1, Ordering::SeqCst);
                     return Err(err).context("execute transaction");
                 }
-                warn!(
-                    attempt = attempts,
-                    "retrying transaction after error: {err}"
-                );
+
                 sleep(Duration::from_millis(100)).await;
             }
         }
@@ -312,17 +336,41 @@ async fn run_txn(client: &RivetClient, ops: &[Operation]) -> Result<(), ClientEr
     Ok(())
 }
 
+fn is_redirectable(err: &ClientError) -> bool {
+    match err {
+        ClientError::OperationFailed { message, .. } => {
+            message.to_ascii_lowercase().contains("catching up")
+                || message
+                    .to_ascii_lowercase()
+                    .contains("retry against another node")
+        }
+        ClientError::Rpc(status) => status.code() == tonic::Code::Unavailable,
+        _ => false,
+    }
+}
+
 async fn preferred_endpoint(cluster: &Arc<Mutex<BenchmarkCluster>>) -> Result<String> {
-    let cluster = cluster.lock().await;
-    if let Some(endpoint) = cluster.leader_endpoint().await {
-        return Ok(endpoint);
+    const ATTEMPTS: usize = 50;
+    const DELAY_MS: u64 = 100;
+
+    for _ in 0..ATTEMPTS {
+        let endpoint = {
+            let cluster = cluster.lock().await;
+            cluster
+                .leader_endpoint()
+                .await
+                .or_else(|| cluster.any_endpoint())
+        };
+        if let Some(endpoint) = endpoint {
+            return Ok(endpoint);
+        }
+        sleep(Duration::from_millis(DELAY_MS)).await;
     }
 
-    cluster
-        .endpoints()
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("no running endpoints"))
+    Err(anyhow!(
+        "no endpoint available after waiting {} ms",
+        ATTEMPTS as u64 * DELAY_MS
+    ))
 }
 
 #[derive(Clone, Debug)]

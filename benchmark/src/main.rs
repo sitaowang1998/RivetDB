@@ -79,6 +79,10 @@ struct RunSnapshot {
     commits: usize,
     commit_every: usize,
     ops_per_sec: f64,
+    redirects: usize,
+    failures: usize,
+    redirect_ratio: f64,
+    failure_ratio: f64,
 }
 
 #[derive(Serialize)]
@@ -133,19 +137,40 @@ async fn main() -> Result<()> {
         )
         .await?;
         println!(
-            "  run {:>2}: {:>8.2?} ({:.1} ops/s, reads={}, writes={}, commits={})",
+            "  run {:>2}: {:>8.2?} ({:.1} ops/s, reads={}, writes={}, commits={}, redirects={}, failures={})",
             run_idx + 1,
             measurement.duration,
             measurement.ops as f64 / measurement.duration.as_secs_f64(),
             measurement.reads,
             measurement.writes,
-            measurement.commits
+            measurement.commits,
+            measurement.redirects,
+            measurement.failures
         );
         runs.push(measurement);
     }
 
     let report = summarize(&args.label, &runs);
     print_trimmed(&args.label, &report.trimmed);
+    let total_ops: usize = report.runs.iter().map(|r| r.ops).sum();
+    let total_redirects: usize = report.runs.iter().map(|r| r.redirects).sum();
+    let total_failures: usize = report.runs.iter().map(|r| r.failures).sum();
+    if total_redirects > 0 || total_failures > 0 {
+        let redirect_ratio = if total_ops == 0 {
+            0.0
+        } else {
+            total_redirects as f64 / total_ops as f64
+        };
+        let failure_ratio = if total_ops == 0 {
+            0.0
+        } else {
+            total_failures as f64 / total_ops as f64
+        };
+        println!(
+            "  redirect/failure ratios: redirects={} ({:.4}), failures={} ({:.4}) across {} ops",
+            total_redirects, redirect_ratio, total_failures, failure_ratio, total_ops
+        );
+    }
     write_experiment_csv(&args.csv_dir, &args.label, &report.runs, &report.trimmed)?;
 
     Ok(())
@@ -164,6 +189,18 @@ fn summarize(label: &str, runs: &[RunMeasurement]) -> ExperimentReport {
             commits: run.commits,
             commit_every: run.commit_every,
             ops_per_sec: run.ops as f64 / run.duration.as_secs_f64(),
+            redirects: run.redirects,
+            failures: run.failures,
+            redirect_ratio: if run.ops == 0 {
+                0.0
+            } else {
+                run.redirects as f64 / run.ops as f64
+            },
+            failure_ratio: if run.ops == 0 {
+                0.0
+            } else {
+                run.failures as f64 / run.ops as f64
+            },
         })
         .collect::<Vec<_>>();
 
@@ -234,13 +271,13 @@ fn write_experiment_csv(
     let mut file = File::create(&path)?;
     writeln!(
         file,
-        "kind,run,duration_ms,ops,reads,writes,commits,commit_every,ops_per_sec"
+        "kind,run,duration_ms,ops,reads,writes,commits,commit_every,ops_per_sec,redirects,failures,redirect_ratio,failure_ratio"
     )?;
 
     for run in runs {
         writeln!(
             file,
-            "run,{},{},{},{},{},{},{},{}",
+            "run,{},{},{},{},{},{},{},{},{},{},{},{}",
             run.run,
             run.duration_ms,
             run.ops,
@@ -248,7 +285,11 @@ fn write_experiment_csv(
             run.writes,
             run.commits,
             run.commit_every,
-            run.ops_per_sec
+            run.ops_per_sec,
+            run.redirects,
+            run.failures,
+            run.redirect_ratio,
+            run.failure_ratio
         )?;
     }
 
