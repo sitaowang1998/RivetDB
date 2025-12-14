@@ -343,6 +343,7 @@ fn is_redirectable(err: &ClientError) -> bool {
                 || message
                     .to_ascii_lowercase()
                     .contains("retry against another node")
+                || message.to_ascii_lowercase().contains("missing key")
         }
         ClientError::Rpc(status) => status.code() == tonic::Code::Unavailable,
         _ => false,
