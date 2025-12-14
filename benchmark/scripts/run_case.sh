@@ -36,3 +36,8 @@ cargo run --release --manifest-path "$ROOT/Cargo.toml" -- \
   --csv-dir "$CSV_DIR" \
   "${STORAGE_ROOT_FLAG[@]}" \
   "$@"
+
+# Cleanup persisted storage on success if STORAGE_ROOT was provided
+if [ -n "${STORAGE_ROOT:-}" ]; then
+  find "$STORAGE_ROOT" -maxdepth 2 -type d -name "$LABEL" -exec rm -rf {} +
+fi
