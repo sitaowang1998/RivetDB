@@ -177,7 +177,7 @@ Solo project (Sitao Wang):
 [Video slide presentation link](https://utoronto-my.sharepoint.com/:v:/g/personal/sitao_wang_mail_utoronto_ca/IQCuxg8ZW2-pQa1vEBTwKcueAe_jXzLIWdU28tmwP39LwW4?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=OtSqBf)
 
 ## Video Demo
-TODO - link will be added here.
+[Video demo lint](https://utoronto-my.sharepoint.com/:v:/g/personal/sitao_wang_mail_utoronto_ca/IQBBXWz_xOJORZxM49v0sYEAAfoX0So6lX55j7pO-unSDMM?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=6V6UP9)
 
 ---
 Proposal content is archived in `docs/proposal.md` for reference.
