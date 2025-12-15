@@ -98,22 +98,34 @@ Takeaway: the cluster survives a leader kill/restart with no failed client opera
 
 Raw CSV files live in `benchmark/reports/csv`; rerun with `./benchmark/scripts/*` to regenerate.
 
-## User / Developer Guide
+## User Guide
 - **API surface**: begin -> get/put -> commit or abort. Followers forward commits to the current leader; learners reject traffic until caught up. Validation conflicts return an error string (`validation conflict`); clients should retry the transaction.
 - **Client example (Rust)**:
 ```rust
 use rivetdb::{ClientConfig, RivetClient};
 
-# #[tokio::main]
-# async fn main() -> Result<(), Box<dyn std::error::Error>> {
-let client = RivetClient::connect(ClientConfig::new("http://127.0.0.1:50051")).await?;
-let txn = client.begin_transaction("demo-client").await?;
-assert!(txn.get("missing").await?.is_none());
-txn.put("item", b"value".to_vec()).await?;
-let receipt = txn.commit().await?;
-println!("commit timestamp: {}", receipt.commit_ts);
-# Ok(())
-# }
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Connect to any node; followers forward commits to the leader.
+    let client = RivetClient::connect(ClientConfig::new("http://127.0.0.1:50051")).await?;
+
+    let txn = client.begin_transaction("demo-client").await?;
+    if let Some(result) = txn.get("item").await? {
+        println!(
+            "existing value for 'item': '{}' (commit_ts {})",
+            String::from_utf8_lossy(&result.value),
+            result.commit_ts
+        );
+    } else {
+        println!("no value for 'item' yet");
+    }
+
+    txn.put("item", b"value".to_vec()).await?;
+    let receipt = txn.commit().await?;
+    println!("commit timestamp: {}", receipt.commit_ts);
+
+    Ok(())
+}
 ```
 - **Run a single node (memory backend)**:
 ```bash
