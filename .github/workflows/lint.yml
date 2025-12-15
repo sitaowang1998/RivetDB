@@ -22,14 +22,16 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo fmt --manifest-path benchmark/Cargo.toml --all -- --check
+          cargo fmt --manifest-path examples/Cargo.toml --all -- --check
 
       - name: Cargo clippy
         run: |
           cargo clippy --all-targets --all-features -- -D warnings
           cargo clippy --manifest-path benchmark/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo clippy --manifest-path examples/Cargo.toml --all-targets --all-features -- -D warnings
 
       - name: Cargo check
         run: |
           cargo check
           cargo check --manifest-path benchmark/Cargo.toml
-
+          cargo check --manifest-path examples/Cargo.toml
