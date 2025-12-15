@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use openraft::ServerState;
 use rivetdb::{
-    PeerConfig, RivetConfig, RivetNode, StorageConfig, collect_metrics, registry, reset_registry,
-    rpc::server::RivetKvService, rpc::service::rivet_kv_server::RivetKvServer,
-    rpc::service::rivet_raft_server::RivetRaftServer, storage::OnDiskStorage, RivetRaftService,
+    PeerConfig, RivetConfig, RivetNode, RivetRaftService, StorageConfig, collect_metrics, registry,
+    reset_registry, rpc::server::RivetKvService, rpc::service::rivet_kv_server::RivetKvServer,
+    rpc::service::rivet_raft_server::RivetRaftServer, storage::OnDiskStorage,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
