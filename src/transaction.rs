@@ -122,19 +122,53 @@ impl CollectedTransaction {
 /// Coordinates optimistic transactions over an MVCC storage engine.
 pub struct TransactionManager<S: StorageEngine> {
     storage: Arc<S>,
-    clock: AtomicU64,
+    clock: CommitClock,
 }
 
-impl<S: StorageEngine> TransactionManager<S> {
-    pub fn new(storage: Arc<S>, initial_ts: Timestamp) -> Self {
+/// Shared logical clock used for snapshot timestamps and commit ordering.
+#[derive(Clone)]
+pub struct CommitClock {
+    inner: Arc<AtomicU64>,
+}
+
+impl CommitClock {
+    pub fn new(initial: Timestamp) -> Self {
         Self {
-            storage,
-            clock: AtomicU64::new(initial_ts),
+            inner: Arc::new(AtomicU64::new(initial)),
         }
     }
 
+    pub fn load(&self) -> Timestamp {
+        self.inner.load(Ordering::SeqCst)
+    }
+
+    /// Advance the clock to at least `ts`, used when applying replicated commits.
+    pub fn advance(&self, ts: Timestamp) {
+        let mut current = self.load();
+        while ts > current {
+            match self
+                .inner
+                .compare_exchange(current, ts, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Reserve the next commit timestamp from the leader.
+    pub fn next(&self) -> Timestamp {
+        self.inner.fetch_add(1, Ordering::SeqCst) + 1
+    }
+}
+
+impl<S: StorageEngine> TransactionManager<S> {
+    pub fn new(storage: Arc<S>, clock: CommitClock) -> Self {
+        Self { storage, clock }
+    }
+
     pub fn begin_transaction(&self) -> TransactionContext {
-        let snapshot_ts = self.clock.load(Ordering::SeqCst);
+        let snapshot_ts = self.clock.load();
         let metadata = TransactionMetadata::new(TxnId::new(), Snapshot::new(snapshot_ts));
         TransactionContext { metadata }
     }
@@ -193,6 +227,11 @@ impl<S: StorageEngine> TransactionManager<S> {
     }
 
     pub fn next_ts(&self) -> Timestamp {
-        self.clock.fetch_add(1, Ordering::SeqCst) + 1
+        self.clock.next()
+    }
+
+    /// Allow downstream consumers (e.g., Raft state machine) to bump the clock after applying a commit.
+    pub fn advance_clock(&self, ts: Timestamp) {
+        self.clock.advance(ts);
     }
 }

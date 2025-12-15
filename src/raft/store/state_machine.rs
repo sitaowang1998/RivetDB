@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::raft::{RaftCommand, RivetRaftConfig};
 use crate::storage::StorageEngine;
+use crate::transaction::CommitClock;
 
 use super::super::decode_command;
 use super::core::{RivetStorageCore, StoredSnapshot};
@@ -18,6 +19,7 @@ use super::core::{RivetStorageCore, StoredSnapshot};
 pub struct RivetStateMachine<S: StorageEngine> {
     pub(super) core: Arc<RwLock<RivetStorageCore>>,
     pub(super) storage: Arc<S>,
+    pub(super) clock: CommitClock,
 }
 
 pub struct RivetSnapshotBuilder {
@@ -66,6 +68,7 @@ where
                         .apply_committed(txn.commit_ts, txn.writes)
                         .await
                         .map_err(|err| map_apply_error(log_id, err.to_string()))?;
+                    self.clock.advance(txn.commit_ts);
 
                     let mut core = self.core.write().await;
                     core.data.state.last_applied = Some(log_id);

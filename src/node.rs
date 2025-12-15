@@ -61,11 +61,12 @@ impl<S: StorageEngine + 'static> RivetNode<S> {
         let registry = global_registry();
         let raft_cfg = default_raft_config();
 
-        let (log_store, state_machine, recovered_ts) =
+        let (log_store, state_machine, clock) =
             RivetStore::handles(storage.clone(), config.data_dir.clone()).await?;
         info!(
             node_id = config.node_id,
-            recovered_ts, "storage recovered for node"
+            recovered_ts = clock.load(),
+            "storage recovered for node"
         );
         let network = RivetNetworkFactory::new(registry.clone());
 
@@ -87,7 +88,7 @@ impl<S: StorageEngine + 'static> RivetNode<S> {
 
         ensure_initial_membership(&raft, &config).await?;
 
-        let txn_manager = TransactionManager::new(storage.clone(), recovered_ts);
+        let txn_manager = TransactionManager::new(storage.clone(), clock.clone());
 
         let mut endpoints = HashMap::new();
         endpoints.insert(config.node_id, config.listen_addr.clone());
