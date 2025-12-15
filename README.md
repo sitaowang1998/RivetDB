@@ -174,7 +174,7 @@ Solo project (Sitao Wang):
 - Remaining gaps: durable snapshot payloads, log compaction tuning, richer client retries on conflicts, and authentication for the gRPC surface.
 
 ## Video Slide Presentation
-TODO - link will be added here.
+[Video slide presentation link](https://utoronto-my.sharepoint.com/:v:/g/personal/sitao_wang_mail_utoronto_ca/IQCuxg8ZW2-pQa1vEBTwKcueAe_jXzLIWdU28tmwP39LwW4?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=OtSqBf)
 
 ## Video Demo
 TODO - link will be added here.
