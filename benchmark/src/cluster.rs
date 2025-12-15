@@ -7,7 +7,7 @@ use openraft::ServerState;
 use rivetdb::{
     PeerConfig, RivetConfig, RivetNode, StorageConfig, collect_metrics, registry, reset_registry,
     rpc::server::RivetKvService, rpc::service::rivet_kv_server::RivetKvServer,
-    storage::OnDiskStorage,
+    rpc::service::rivet_raft_server::RivetRaftServer, storage::OnDiskStorage, RivetRaftService,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -279,10 +279,16 @@ impl NodeServer {
 
         let node = Arc::new(RivetNode::new(config, storage).await?);
         let service = RivetKvService::new(node.clone());
+        let raft_service = RivetRaftService::new(
+            node.config().node_id,
+            node.config().listen_addr.clone(),
+            node.raft().clone(),
+        );
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
             let _ = Server::builder()
+                .add_service(RivetRaftServer::new(raft_service))
                 .add_service(RivetKvServer::new(service))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = shutdown_rx.await;

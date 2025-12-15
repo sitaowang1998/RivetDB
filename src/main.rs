@@ -4,8 +4,11 @@ use std::sync::Arc;
 use clap::Parser;
 use rivetdb::rpc::server::RivetKvService;
 use rivetdb::rpc::service::rivet_kv_server::RivetKvServer;
+use rivetdb::rpc::service::rivet_raft_server::RivetRaftServer;
 use rivetdb::storage::StorageAdapter;
-use rivetdb::{PeerConfig, RivetConfig, RivetNode, StorageBackend, StorageConfig};
+use rivetdb::{
+    PeerConfig, RivetConfig, RivetNode, RivetRaftService, StorageBackend, StorageConfig,
+};
 use std::path::PathBuf;
 use tonic::transport::Server;
 use tracing::info;
@@ -31,9 +34,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("configuration listen_addr must be a valid socket address");
 
     let service = RivetKvService::new(node.clone());
+    let raft_service = RivetRaftService::new(
+        node.config().node_id,
+        node.config().listen_addr.clone(),
+        node.raft().clone(),
+    );
     info!("starting gRPC server on {}", addr);
 
     Server::builder()
+        .add_service(RivetRaftServer::new(raft_service))
         .add_service(RivetKvServer::new(service))
         .serve(addr)
         .await?;

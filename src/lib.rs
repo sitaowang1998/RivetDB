@@ -17,8 +17,8 @@ pub use client::{ClientConfig, ClientError, ClientTransaction, GetResult, RivetC
 pub use config::{PeerConfig, RivetConfig, StorageBackend, StorageConfig};
 pub use node::{NodeError, NodeRole, RivetNode};
 pub use raft::{
-    RaftRegistry, RivetNetworkFactory, RivetRaft, RivetRaftConfig, RivetStore, collect_metrics,
-    default_raft_config, registry, reset_registry,
+    RaftRegistry, RivetNetworkFactory, RivetRaft, RivetRaftConfig, RivetRaftService, RivetStore,
+    collect_metrics, default_raft_config, registry, reset_registry,
 };
 pub use rpc::server::RivetKvService;
 pub use rpc::service::rivet_kv_client::RivetKvClient;

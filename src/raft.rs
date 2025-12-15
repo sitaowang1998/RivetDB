@@ -9,11 +9,13 @@ use crate::transaction::WriteIntent;
 use crate::types::{Timestamp, TxnId};
 
 mod network;
+mod rpc;
 mod store;
 
 pub use network::{
     RaftRegistry, RivetNetwork, RivetNetworkFactory, collect_metrics, registry, reset_registry,
 };
+pub use rpc::RivetRaftService;
 pub use store::{
     PersistenceError, RivetLogReader, RivetLogStore, RivetSnapshotBuilder, RivetStateMachine,
     RivetStore,

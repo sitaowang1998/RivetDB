@@ -26,14 +26,15 @@ struct ClusterNode {
 }
 
 impl ClusterNode {
-    async fn spawn(config: RivetConfig, storage: common::TestStorage) -> Self {
+    async fn spawn(
+        config: RivetConfig,
+        storage: common::TestStorage,
+    ) -> Result<Self, std::io::Error> {
         let addr: SocketAddr = config
             .listen_addr
             .parse()
             .expect("config.listen_addr must be socket address");
-        let listener = TcpListener::bind(addr)
-            .await
-            .expect("failed to bind cluster node listener");
+        let listener = TcpListener::bind(addr).await?;
         let addr = listener.local_addr().expect("read listener addr");
         let incoming = TcpIncoming::from_listener(listener, true, None).expect("build TcpIncoming");
 
@@ -56,13 +57,13 @@ impl ClusterNode {
                 .await
         });
 
-        Self {
+        Ok(Self {
             id: config.node_id,
             addr,
             _storage: storage,
             shutdown: Some(shutdown_tx),
             handle: Some(handle),
-        }
+        })
     }
 
     fn endpoint(&self) -> String {
@@ -105,7 +106,16 @@ async fn follower_commit_is_forwarded() {
             let storage = common::TestStorage::new(backend);
             let config = RivetConfig::new(*node_id, addr.clone(), peers, storage.data_dir())
                 .with_storage(storage.storage_config());
-            let node = ClusterNode::spawn(config, storage).await;
+            let node = match ClusterNode::spawn(config, storage).await {
+                Ok(node) => node,
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!(
+                        "skipping follower_commit_is_forwarded (permission denied binding socket: {err})"
+                    );
+                    return;
+                }
+                Err(err) => panic!("failed to start cluster node: {err}"),
+            };
             nodes.push(node);
         }
 

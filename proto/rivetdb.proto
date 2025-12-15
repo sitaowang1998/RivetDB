@@ -92,3 +92,18 @@ service RivetKv {
     rpc Abort(AbortRequest) returns (AbortResponse);
     rpc ShipTransaction(ShipTransactionRequest) returns (CommitResponse);
 }
+
+// Generic Raft RPC surface: payloads are serialized with Serde on the Rust side.
+message RaftRequest {
+    bytes data = 1;
+}
+
+message RaftResponse {
+    bytes data = 1;
+}
+
+service RivetRaft {
+    rpc AppendEntries(RaftRequest) returns (RaftResponse);
+    rpc InstallSnapshot(RaftRequest) returns (RaftResponse);
+    rpc Vote(RaftRequest) returns (RaftResponse);
+}
